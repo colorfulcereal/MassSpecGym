@@ -348,6 +348,26 @@ class MolToFingerprints(MolTransform):
         return collate_data_d
 
 
+class MolToHalogensVector(MolTransform):
+    def __init__(self):
+        self.halogen_symbols = ['F', 'Cl', 'Br', 'I']
+        self.halogen_index = {symbol: i for i, symbol in enumerate(self.halogen_symbols)}
+
+    def from_smiles(self, smiles: str):
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Invalid SMILES string: {smiles}")
+
+        halogen_vector = np.zeros(4, dtype=np.int32)
+
+        for atom in mol.GetAtoms():
+            symbol = atom.GetSymbol()
+            if symbol in self.halogen_index:
+                index = self.halogen_index[symbol]
+                halogen_vector[index] = 1
+
+        return halogen_vector
+
 class MetaTransform(ABC):
 
     @abstractmethod
