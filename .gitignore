@@ -140,3 +140,4 @@ dmypy.json
 # W&B
 wandb/
 lightning_logs/*
+logs/lightning_logs/*
