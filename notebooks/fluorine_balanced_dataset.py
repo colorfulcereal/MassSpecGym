@@ -1,4 +1,3 @@
-# filepath: /Users/ramsindhu/MassSpecGym/fluorine_dataset.py
 import numpy as np
 from massspecgym.data import MassSpecDataset
 from massspecgym.data.transforms import MolToHalogensVector
