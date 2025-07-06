@@ -141,3 +141,4 @@ dmypy.json
 wandb/
 lightning_logs/*
 logs/lightning_logs/*
+NIST20_MoNA_A_all_with_F_Murcko_split_MCE_test_minimum_cols.pkl
