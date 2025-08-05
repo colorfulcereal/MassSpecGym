@@ -368,6 +368,34 @@ class MolToHalogensVector(MolTransform):
 
         return halogen_vector
 
+class MolToPFASVector(MolTransform):
+
+    def __init__(self):
+    # SMARTS for –CF3 and –CF2– groups (saturated and fully fluorinated)
+        self.cf3_smarts = '[CX4](F)(F)F'       # –CF3
+        self.cf2_smarts = '[CX4H0](F)(F)'      # –CF2– (not terminal, excludes CF3)
+
+        self.cf3_pattern = Chem.MolFromSmarts(self.cf3_smarts)
+        self.cf2_pattern = Chem.MolFromSmarts(self.cf2_smarts)
+    
+    def is_pfas_oecd(self, smiles: str):
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return 0
+
+            if mol.HasSubstructMatch(self.cf3_pattern) or mol.HasSubstructMatch(self.cf2_pattern):
+                return 1
+            else:
+                return 0
+        except Exception:
+            return 'Error'
+
+    def from_smiles(self, smiles: str):
+        halogen_vector = np.zeros(4, dtype=np.int32)
+        halogen_vector[0]= self.is_pfas_oecd(smiles)
+        return halogen_vector
+
 class MetaTransform(ABC):
 
     @abstractmethod
