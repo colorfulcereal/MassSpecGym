@@ -12,6 +12,8 @@ from massspecgym.simulation_utils.feat_utils import MolGraphFeaturizer, get_fing
 from massspecgym.simulation_utils.misc_utils import scatter_reduce
 import massspecgym.utils as utils
 from massspecgym.definitions import CHEM_ELEMS
+from rdkit import Chem
+from rdkit.Chem import rdchem
 
 
 class SpecTransform(ABC):
@@ -371,25 +373,66 @@ class MolToHalogensVector(MolTransform):
 class MolToPFASVector(MolTransform):
 
     def __init__(self):
-    # SMARTS for –CF3 and –CF2– groups (saturated and fully fluorinated)
+        # SMARTS for –CF3 and –CF2– groups (saturated and fully fluorinated)
         self.cf3_smarts = '[CX4](F)(F)F'       # –CF3
         self.cf2_smarts = '[CX4H0](F)(F)'      # –CF2– (not terminal, excludes CF3)
 
         self.cf3_pattern = Chem.MolFromSmarts(self.cf3_smarts)
         self.cf2_pattern = Chem.MolFromSmarts(self.cf2_smarts)
     
-    def is_pfas_oecd(self, smiles: str):
+    # def is_pfas_oecd(self, smiles: str):
+    #     try:
+    #         mol = Chem.MolFromSmiles(smiles)
+    #         if mol is None:
+    #             return 0
+
+    #         if mol.HasSubstructMatch(self.cf3_pattern) or mol.HasSubstructMatch(self.cf2_pattern):
+    #             return 1
+    #         else:
+    #             return 0
+    #     except Exception:
+    #         return 'Error'
+
+    # Definition of PFAS  based on OECD: https://pubs.acs.org/doi/10.1021/acs.est.1c06896
+    def is_pfas_oecd(self, smiles: str) -> int:
         try:
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
                 return 0
 
-            if mol.HasSubstructMatch(self.cf3_pattern) or mol.HasSubstructMatch(self.cf2_pattern):
-                return 1
-            else:
-                return 0
-        except Exception:
-            return 'Error'
+            for atom in mol.GetAtoms():
+                if atom.GetAtomicNum() != 6:  # carbon only
+                    continue
+
+                # neighbors
+                neigh = atom.GetNeighbors()
+                sym = [n.GetSymbol() for n in neigh]
+
+                num_F = sum(1 for s in sym if s == "F")
+                has_X  = any(s in ("Cl", "Br", "I") for s in sym)
+                has_H  = atom.GetTotalNumHs() > 0  # implicit + explicit Hs
+
+                # require sp3 and all single bonds (rules out alkenes like TFE)
+                is_sp3 = atom.GetHybridization() == rdchem.HybridizationType.SP3
+                all_single = all(
+                    mol.GetBondBetweenAtoms(atom.GetIdx(), n.GetIdx()).GetBondType() == rdchem.BondType.SINGLE
+                    for n in neigh
+                )
+
+                # CF3: at least 3 F neighbors; CF2: at least 2 F neighbors
+                if (num_F >= 3 or num_F >= 2) and is_sp3 and all_single and not has_H and not has_X:
+                    # For CF2, make sure there's at least one non-F neighbor so it's truly "-CF2-"
+                    if num_F >= 3:
+                        return 1
+                    else:  # CF2
+                        nonF_neighbors = sum(1 for s in sym if s != "F")
+                        if nonF_neighbors >= 1:  # "-CF2-" has something other than F attached
+                            return 1
+
+            return 0
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return 0
 
     def from_smiles(self, smiles: str):
         halogen_vector = np.zeros(4, dtype=np.int32)
