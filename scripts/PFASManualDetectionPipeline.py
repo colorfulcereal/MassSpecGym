@@ -8,7 +8,7 @@ from IPython.display import display
 import csv
 
 # Example: Load your dataframe
-pfas_labeled_df = pd.read_csv('/teamspace/studios/this_studio/files/merged_massspec_nist20_nist_new_with_fold.tsv', sep='\t')
+pfas_labeled_df = pd.read_csv('/teamspace/studios/this_studio/files/merged_massspec_nist20_nist_new_with_pfas_fold.tsv', sep='\t')
 
 print(pfas_labeled_df.iloc[0])
 
