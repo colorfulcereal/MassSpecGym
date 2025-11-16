@@ -12,7 +12,7 @@ from massspecgym.data import MassSpecDataset, MassSpecDataModule
 from massspecgym.data.transforms import SpecTokenizer, MolFingerprinter
 from massspecgym.models.base import Stage
 from massspecgym.models.retrieval.base import MassSpecGymModel
-from sklearn.metrics import precision_score, recall_score
+from sklearn.metrics import precision_score, recall_score, accuracy_score
 from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.utilities import grad_norm
@@ -28,13 +28,14 @@ from rdkit import Chem
 from massspecgym.data.transforms import MolToHalogensVector, MolToPFASVector
 import numpy as np
 from pytorch_lightning.loggers import WandbLogger
+from sklearn.metrics import roc_auc_score, average_precision_score
 
 numpy.set_printoptions(threshold=sys.maxsize)
 
 pl.seed_everything(0)
 
 DEBUG = False
-n_examples_to_sample = 30
+n_examples_to_sample = 100
 
 if DEBUG:
     mgf_pth = Path("/teamspace/studios/this_studio/MassSpecGym/data/debug/example_5_spectra.mgf")
@@ -58,7 +59,8 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         gamma: float=0.5,
         batch_size: int=64,
         threshold: float=0.5,
-        hard_neg_weight: float=2.5,
+        hard_neg_weight: float=1,
+        flourine_model_pt: str='',
         *args,
         **kwargs
     ):
@@ -81,21 +83,44 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         self.val_precision = BinaryPrecision()
         self.val_recall = BinaryRecall()
         self.val_accuracy = BinaryAccuracy()
-        
-        self.test_precision = BinaryPrecision()
-        self.test_recall = BinaryRecall()
-        self.test_accuracy = BinaryAccuracy()
-        
-        # loading the DreaMS model weights from the internet
-        self.main_model = PreTrainedModel.from_ckpt(
-            # ckpt_path should be replaced with the path to the ssl_model.ckpt model downloaded from https://zenodo.org/records/10997887
-            ckpt_path="https://zenodo.org/records/10997887/files/ssl_model.ckpt?download=1", ckpt_cls=DreaMSModel, n_highest_peaks=60
-        ).model.train()
+                
+        if flourine_model_pt != '':
+            # Load pretrained fluorine model checkpoint
+            full_prev_model = HalogenDetectorDreamsTest.load_from_checkpoint(checkpoint_path=flourine_model_pt)
+
+            print("✅ Loaded pretrained fluorine model.")
+
+            # 2️⃣ Extract only the main (feature extractor) part
+            #    This is typically your transformer or backbone model inside
+            backbone = full_prev_model.main_model  # the encoder part
+
+            # 3️⃣ Remove or replace the final classification head
+            if hasattr(backbone, "lin_out"):
+                backbone.lin_out = torch.nn.Identity()
+                print("🧩 Replaced fluorine model linear head with Identity.")
+            elif hasattr(full_prev_model, "lin_out"):
+                full_prev_model.lin_out = torch.nn.Identity()
+                print("🧩 Removed linear head from full model.")
+            else:
+                print("⚠️ No linear head found — continuing with main_model only.")
+
+            # 4️⃣ Optionally freeze the backbone to use for feature extraction
+            #for p in backbone.parameters():
+            #    p.requires_grad = False
+            self.main_model = backbone
+        else: 
+            # loading the DreaMS model weights from the internet
+            self.main_model = PreTrainedModel.from_ckpt(
+                # ckpt_path should be replaced with the path to the ssl_model.ckpt model downloaded from https://zenodo.org/records/10997887
+                ckpt_path="https://zenodo.org/records/10997887/files/ssl_model.ckpt?download=1", ckpt_cls=DreaMSModel, n_highest_peaks=60
+            ).model.train()
+
+        # New classification head for PFAS detection
         self.lin_out = nn.Linear(1024, 1) # for F
 
     def forward(self, x):
-        output_main_model = self.main_model(x)[:, 0, :] # to get the precursor peak token embedding 
-        fl_probability = F.sigmoid(self.lin_out(output_main_model))
+        output_main_model = self.main_model(x)[:, 0, :] # to get the precursor peak token embedding )
+        fl_probability = torch.sigmoid(self.lin_out(output_main_model))
         return fl_probability
 
     def step(
@@ -113,19 +138,8 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         # Extract true PFAS labels (1 = PFAS, 0 = not PFAS)
         true_values = halogen_vector_true[:, 0].float()  # shape [batch_size]
 
-        
-        # # Build per-sample weights
-        # weights = torch.ones_like(true_values, dtype=torch.float32, device=true_values.device)
-
-        # # Whether fluorine is present in the molecule
-        # F_present = batch["F"].float()  # shape [batch_size], e.g. 1.0 if 'F' in formula, else 0.0
-
-        # # --- Step 1: Define hard negatives ---
-        # # Hard negatives are molecules containing F but not PFAS
-        # hard_negatives = (F_present == 1) & (true_values == 0)
-
-        # # --- Step 2: Boost weight for hard negatives 
-        # weights = torch.where(hard_negatives, weights * self.hard_neg_weight, weights)
+        #print("--predicted_prob", predicted_probs)
+        #print("--true_values", true_values)
 
         # --- Step 0: Base weights ---
         weights = torch.ones_like(true_values, dtype=torch.float32, device=true_values.device)
@@ -136,18 +150,13 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         # --- Step 2: Hard negatives mask (F present but not PFAS) ---
         hard_negatives = (F_present == 1) & (true_values == 0)
 
-        # --- Step 3: Abundance-based weights (from dataset preprocessing) ---
-        # Each sample has a value in batch["abundance_weight"], already normalized
-        abundance_weights = batch["abundance_weight"].to(true_values.device).float()
-
-        # --- Step 4: Combine all weighting schemes ---
-        #   - Start with abundance weights
+        # --- Step 3: Combine all weighting schemes ---
         #   - Boost hard negatives by `self.hard_neg_weight`
         #   - Optionally cap or normalize if you want stable loss scaling
-        weights = abundance_weights * torch.where(hard_negatives, self.hard_neg_weight, 1.0)
+        weights = torch.where(hard_negatives, self.hard_neg_weight, 1.0)
 
         # Optional: Normalize weights to keep total scale consistent
-        weights = weights / weights.mean()
+        # weights = weights / weights.mean()
 
         if DEBUG:
             predicted_probs = predicted_probs[0] # for testing
@@ -159,7 +168,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         ### Focal Loss: https://amaarora.github.io/posts/2020-06-29-FocalLoss.html ### 
         # Increase loss for minority misclassification (F = 1 but predicted as 0) and 
         # decreases loss for majority class misclassification (F = 0 but predicted as 1)
-        # Our MassSpecGym training data is skewed with only 5% of molecules containing Fluorine
+        # Our MassSpecGym training data is skewed with only 6% of molecules being PFAS
        
         bce_loss = nn.BCELoss(reduction='none')
         per_sample_loss = bce_loss(predicted_probs, true_values)
@@ -193,7 +202,8 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
 
         # Extract the 1st column --> fluorine predictions
         true_labels = halogen_vector_true[:, 0] # shape [batch_size]
-        
+        # print("----", true_labels)
+
         # make shape [batch_size x 1] into shape [batch_size]
         pred_bool_labels = halogen_vector_pred_binary.squeeze() # shape [batch_size]
 
@@ -205,7 +215,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             self.val_precision.update(pred_bool_labels, true_labels)
             self.val_recall.update(pred_bool_labels, true_labels)
             self.val_accuracy.update(pred_bool_labels, true_labels)
-
+            
             ## debugging the false negatives ##
             # Collect optional metadata if available
             identifiers = batch.get("identifier", ["NA"] * len(true_labels))
@@ -246,20 +256,12 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         self.all_identifiers = []
         self.all_spectra = []
 
-    def _reset_metrics_test(self):
-        # Reset states for next epoch
-        self.test_precision.reset()
-        self.test_recall.reset()
-        self.test_accuracy.reset()
 
     def on_train_epoch_start(self) -> None:
         self._reset_metrics_train()
 
     def on_validation_epoch_start(self) -> None:
         self._reset_metrics_val()
-
-    def on_test_epoch_start(self) -> None:
-        self._reset_metrics_test()
 
     def on_train_epoch_end(self) -> None:
         precision = self.train_precision.compute()
@@ -282,11 +284,16 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         recall = self.val_recall.compute()
         accuracy = self.val_accuracy.compute()
         f1_score = (2*precision*recall)/(precision + recall) if (precision + recall) != 0 else 0
+        val_auroc = roc_auc_score(self.all_true_labels, self.all_predicted_probs)
+        val_ap_score = average_precision_score(self.all_true_labels, self.all_predicted_probs)
+
         self.log_dict({
                 f"val_/precision": precision,
                 f"val_/recall": recall,
                 f"val_/accuracy": accuracy,
-                f"val_/f1_score": f1_score
+                f"val_/f1_score": f1_score,
+                f"val_/auroc": val_auroc,
+                f"val_/ap_score": val_ap_score
             },
             prog_bar=True,
             on_epoch=True,
@@ -308,7 +315,8 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
 
         # Identify True Positives and False Negatives
         df_tp = df_preds[(df_preds["true_label"] == 1) & (df_preds["pred_label"] == 1)]
-        df_fn = df_preds[(df_preds["true_label"] == 1) & (df_preds["pred_label"] == 0)]
+        # Identify False Negatives which have probability <= 0.25
+        df_fn = df_preds[(df_preds["true_label"] == 1) & (df_preds["pred_label"] == 0) & (df_preds["pred_prob"] <= 0.25)]
 
         print(f"\n🧪 Validation Summary:")
         print(f"  True Positives (TP): {len(df_tp)}")
@@ -335,24 +343,45 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             for i, ident in enumerate(fn_samples["identifier"].tolist(), 1):
                 f.write(f"  {i}. {ident}\n")
 
-        print(f"✅ True Positive identifiers written to {tp_filename}")
-        print(f"✅ False Negative identifiers written to {fn_filename}")
+        pred_prob_filename = "pfas_pred_probs.csv"
+        # Find the predicted probabilities for all PFAS
+        df_p = df_preds[(df_preds["true_label"] == 1)]
+        df_p["pred_prob"].to_csv(pred_prob_filename, index=False)
 
-    def on_test_epoch_end(self) -> None:
-        precision = self.test_precision.compute()
-        recall = self.test_recall.compute()
-        accuracy = self.test_accuracy.compute()
-        f1_score = (2*precision*recall)/(precision + recall) if (precision + recall) != 0 else 0
-        self.log_dict({
-                f"test_/precision": precision,
-                f"test_/recall": recall,
-                f"test_/accuracy": accuracy,
-                f"test_/f1_score": f1_score
-            },
-            prog_bar=True,
-            on_epoch=True,
-            on_step=False
-        )
+        print(f"✅ True Positive identifiers written to {tp_filename}")
+        print(f"✅ False Negative identifiers wth probability <= 0.25 written to {fn_filename}")
+        print(f"✅ Predicted Probabilities Positives written to {pred_prob_filename}")
+
+        self.save_precision_recall_table()
+
+
+    def save_precision_recall_table(self) -> None:
+    # --- after you already have self.all_true_labels / self.all_predicted_probs ---
+        y_true = np.array(self.all_true_labels)
+        y_prob = np.array(self.all_predicted_probs)
+
+        thresholds = np.arange(0.0, 1.01, 0.1)   # 0.00 → 1.00 in steps of 0.1
+        rows = []
+
+        for t in thresholds:
+            y_pred = (y_prob >= t).astype(int)
+            precision = precision_score(y_true, y_pred, zero_division="warn")
+            recall    = recall_score(y_true, y_pred, zero_division="warn")
+            accuracy  = accuracy_score(y_true, y_pred)
+            # Compute F1 (safe even if precision+recall = 0)
+            f1 = (
+                2 * precision * recall / (precision + recall)
+                if (precision + recall) > 0
+                else 0
+            )
+            rows.append((t, precision, recall, accuracy, f1))
+
+        # Convert to dataframe for cleaner printing
+        df_thresh = pd.DataFrame(rows, columns=["threshold", "precision", "recall", "accuracy", "f1"])
+
+        print("\n=== Precision / Recall / Accuracy / F1 by Threshold ===")
+        print(df_thresh.to_string(index=False))
+        df_thresh.to_csv("pr_table.csv", index=False)
 
 import re
 
@@ -369,7 +398,8 @@ class TestMassSpecDataset(MassSpecDataset):
         # Apply all transformations to the spectrum
         item = {}
 
-        item['abundance_weight'] = metadata['abundance_weight']
+        if 'abundance_weight' in metadata:
+            item['abundance_weight'] = metadata['abundance_weight']
         # check the SMILES
         if re.search("f", mol, re.IGNORECASE):
             item['F'] = 1
@@ -421,10 +451,9 @@ torch.set_float32_matmul_precision('high')
 max_epochs = 1
 n_peaks = 60
 threshold = 0.9
-alpha = 0.25 # 0.25, 0.5, 0.75, 1 - found 0.25 as best
-gamma = 0.75 #  0.25, 0.5, 0.75, 1 - found 0.75 as best
-lr = 1e-5 # 3e-5, 5e-5 - found 1e-5 as best
-hard_neg_weights = [1.5] # [2, 3, 3.5, 4]
+alpha = 0.25 # found 0.25 as best
+gamma = 0.75 # found 0.75 as best
+lr = 1e-5 # found 1e-5 as best
 num_iterations = 1
 
 if DEBUG:
@@ -432,54 +461,59 @@ if DEBUG:
 else:
     batch_size = 64 # 64 is best (tried 128)
 
-for weight in hard_neg_weights:
-    for i in range(0, num_iterations):
-        # Load dataset
-        dataset = TestMassSpecDataset(
-            spec_transform=SpecTokenizer(n_peaks=n_peaks),
-            mol_transform = MolToPFASVector(),
-            #pth='/teamspace/studios/this_studio/files/merged_massspec_nist20_with_fold.tsv'
-            pth='/teamspace/studios/this_studio/files/pfas_labeled_with_inverse_abundance_weights.tsv'
-        )
+for i in range(0, num_iterations):
+    # Load dataset
+    dataset = TestMassSpecDataset(
+        spec_transform=SpecTokenizer(n_peaks=n_peaks),
+        mol_transform = MolToPFASVector(),
+        pth='/teamspace/studios/this_studio/files/merged_massspec_nist20_nist_new_with_fold.tsv'
+    )
 
-        # Init data module
-        data_module = MassSpecDataModule(
-            dataset=dataset,
-            batch_size=batch_size,
-            split_pth=split_pth,
-            num_workers=4
-        )
+    # Init data module
+    data_module = MassSpecDataModule(
+        dataset=dataset,
+        batch_size=batch_size,
+        split_pth=split_pth,
+        num_workers=4
+    )
 
-        # Init model
-        model = HalogenDetectorDreamsTest(
-            threshold=threshold,
-            alpha=alpha,
-            gamma=gamma,
-            batch_size=batch_size,
-            lr=lr,
-            hard_neg_weight=weight
-        )
+    # Init model
+    model = HalogenDetectorDreamsTest(
+        threshold=threshold,
+        alpha=alpha,
+        gamma=gamma,
+        batch_size=batch_size,
+        lr=lr
+        #flourine_model_pt='/teamspace/studios/this_studio/MassSpecGym/scripts/HalogenDetection-FocalLoss-MergedMassSpecNIST20/nei65gyv/checkpoints/epoch=0-step=8920.ckpt'
+    )
 
-        # initialise the wandb logger and name your wandb project
-        wandb_logger = WandbLogger(project='PFASDetection-FocalLoss-MergedMassSpecNIST20OECDWith_PFASExceptions')
-        trainer = Trainer(accelerator="auto", devices="auto", max_epochs=max_epochs, logger=wandb_logger, val_check_interval=0.2, strategy="ddp")
+    # initialise the wandb logger and name your wandb project
+    wandb_logger = WandbLogger(project='HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_OECD')
+    #wandb_logger = WandbLogger(project='PFASDetection-FocalLoss-MergedMassSpecNIST20OECDWith_PFASExceptions')
+    #wandb_logger = WandbLogger(project='HalogenDetection-FocalLoss-MergedMassSpecNIST20')
 
-        # add your batch size to the wandb config
-        wandb_logger.experiment.config["batch_size"] = batch_size
-        wandb_logger.experiment.config["n_peaks"] = n_peaks
-        wandb_logger.experiment.config["threshold"] = threshold
-        wandb_logger.experiment.config["alpha"] = alpha
-        wandb_logger.experiment.config["gamma"] = gamma
-        wandb_logger.experiment.config["hard_neg_weight"] = weight
+    trainer = Trainer(
+            accelerator="auto", 
+            devices="auto", 
+            max_epochs=max_epochs, 
+            logger=wandb_logger, 
+            val_check_interval=0.2)
 
-        # Validate before training
-        data_module.prepare_data() 
-        data_module.setup()  # Explicit call needed for validate before fit
+    # add your batch size to the wandb config
+    wandb_logger.experiment.config["batch_size"] = batch_size
+    wandb_logger.experiment.config["n_peaks"] = n_peaks
+    wandb_logger.experiment.config["threshold"] = threshold
+    wandb_logger.experiment.config["alpha"] = alpha
+    wandb_logger.experiment.config["gamma"] = gamma
 
-        trainer.validate(model, datamodule=data_module)
+    # Validate before training
+    data_module.prepare_data() 
+    data_module.setup()  # Explicit call needed for validate before fit
 
-        # # Train
-        trainer.fit(model, datamodule=data_module)
+    trainer.validate(model, datamodule=data_module)
 
-        # [optional] finish the wandb run, necessary in notebooks
-        wandb.finish()
+    # # Train
+    trainer.fit(model, datamodule=data_module)
+
+    # [optional] finish the wandb run, necessary in notebooks
+    wandb.finish()
