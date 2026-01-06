@@ -14,7 +14,7 @@ import massspecgym.utils as utils
 from massspecgym.definitions import CHEM_ELEMS
 from rdkit import Chem
 from rdkit.Chem import rdchem
-
+from collections import defaultdict
 
 class SpecTransform(ABC):
     """
@@ -371,72 +371,67 @@ class MolToHalogensVector(MolTransform):
         return halogen_vector
 
 class MolToPFASVector(MolTransform):
-
-    def __init__(self):
-        # SMARTS for –CF3 and –CF2– groups (saturated and fully fluorinated)
-        self.cf3_smarts = '[CX4](F)(F)F'       # –CF3
-        self.cf2_smarts = '[CX4H0](F)(F)'      # –CF2– (not terminal, excludes CF3)
-
-        self.cf3_pattern = Chem.MolFromSmarts(self.cf3_smarts)
-        self.cf2_pattern = Chem.MolFromSmarts(self.cf2_smarts)
     
-    # def is_pfas_oecd(self, smiles: str):
-    #     try:
-    #         mol = Chem.MolFromSmiles(smiles)
-    #         if mol is None:
-    #             return 0
+    def __init__(self):
+        return
 
-    #         if mol.HasSubstructMatch(self.cf3_pattern) or mol.HasSubstructMatch(self.cf2_pattern):
-    #             return 1
-    #         else:
-    #             return 0
-    #     except Exception:
-    #         return 'Error'
+    def _is_pf_carbon(self, a: Chem.Atom) -> bool:
+        """Aliphatic carbon with 0 H and 2 or 3 attached fluorines (CF2/CF3)."""
+        if a.GetAtomicNum() != 6 or a.GetIsAromatic():
+            return False
+        if a.GetTotalNumHs() != 0:
+            return False
+        f = sum(1 for n in a.GetNeighbors() if n.GetAtomicNum() == 9)
+        return f in (2, 3)
 
-    # Definition of PFAS  based on OECD: https://pubs.acs.org/doi/10.1021/acs.est.1c06896
-    def is_pfas_oecd(self, smiles: str) -> int:
+    def _pf_carbon_graph_edges(self, mol: Chem.Mol):
+        """
+        Build edges between PF-carbons:
+        - direct C–C bond between PF-carbons
+        - ether bridge PF-C–O–PF-C becomes an edge between those PF-carbons
+        Returns: set of carbon indices, adjacency dict (carbons only)
+        """
+        cset = {a.GetIdx() for a in mol.GetAtoms() if self._is_pf_carbon(a)}
+        adj = defaultdict(set)
+
+        # Direct PF-carbon to PF-carbon bonds
+        for b in mol.GetBonds():
+            i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+            if i in cset and j in cset:
+                adj[i].add(j)
+                adj[j].add(i)
+
+        # Ether bridges: PF-C -- O -- PF-C  => connect the PF-carbons
+        for a in mol.GetAtoms():
+            if a.GetAtomicNum() != 8 or a.GetIsAromatic():
+                continue
+            nbrs = [n.GetIdx() for n in a.GetNeighbors() if n.GetAtomicNum() == 6]
+            if len(nbrs) == 2 and nbrs[0] in cset and nbrs[1] in cset:
+                i, j = nbrs
+                adj[i].add(j)
+                adj[j].add(i)
+
+        return cset, adj
+
+    def has_pf_chain_ge_2(self, smiles: str) -> bool:
+        """
+        Fast test: returns True iff there is at least one PF-carbon connected to another PF-carbon
+        (directly or via ether). This excludes isolated CF3/CF2 cases.
+        """
         try:
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
-                return 0
+                return False
 
-            for atom in mol.GetAtoms():
-                if atom.GetAtomicNum() != 6:  # carbon only
-                    continue
-
-                # neighbors
-                neigh = atom.GetNeighbors()
-                sym = [n.GetSymbol() for n in neigh]
-
-                num_F = sum(1 for s in sym if s == "F")
-                has_X  = any(s in ("Cl", "Br", "I") for s in sym)
-                has_H  = atom.GetTotalNumHs() > 0  # implicit + explicit Hs
-
-                # require sp3 and all single bonds (rules out alkenes like TFE)
-                is_sp3 = atom.GetHybridization() == rdchem.HybridizationType.SP3
-                all_single = all(
-                    mol.GetBondBetweenAtoms(atom.GetIdx(), n.GetIdx()).GetBondType() == rdchem.BondType.SINGLE
-                    for n in neigh
-                )
-
-                # CF3: at least 3 F neighbors; CF2: at least 2 F neighbors
-                if (num_F >= 3 or num_F >= 2) and is_sp3 and all_single and not has_H and not has_X:
-                    # For CF2, make sure there's at least one non-F neighbor so it's truly "-CF2-"
-                    if num_F >= 3:
-                        return 1
-                    else:  # CF2
-                        nonF_neighbors = sum(1 for s in sym if s != "F")
-                        if nonF_neighbors >= 1:  # "-CF2-" has something other than F attached
-                            return 1
-
-            return 0
+            cset, adj = self._pf_carbon_graph_edges(mol)
+            return any(len(adj[c]) > 0 for c in cset)
         except Exception as e:
             print(f"An error occurred: {e}")
             return 0
 
     def from_smiles(self, smiles: str):
         halogen_vector = np.zeros(4, dtype=np.int32)
-        halogen_vector[0]= self.is_pfas_oecd(smiles)
+        halogen_vector[0]= self.has_pf_chain_ge_2(smiles)
         return halogen_vector
 
 class MetaTransform(ABC):
