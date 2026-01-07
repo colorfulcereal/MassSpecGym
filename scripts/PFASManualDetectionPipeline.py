@@ -8,13 +8,18 @@ from IPython.display import display
 import csv
 
 # Example: Load your dataframe
-pfas_labeled_df = pd.read_csv('/teamspace/studios/this_studio/files/merged_massspec_nist20_nist_new_with_pfas_fold.tsv', sep='\t')
+inp_file='/teamspace/studios/this_studio/files/merged_massspec_nist20_nist_new_env_pfas_with_fold.tsv'
+pfas_labeled_df = pd.read_csv(f'{inp_file}', sep='\t')
 
 print(pfas_labeled_df.iloc[0])
 
 # pick only the validation set
 pfas_labeled_df = pfas_labeled_df[pfas_labeled_df['fold'] == 'val']
 print(f"Validation set size: {len(pfas_labeled_df)}")
+
+# test only the validation set is_PFAS == 1
+pfas_labeled_df = pfas_labeled_df[pfas_labeled_df['is_PFAS'] == 1]
+print(f"Validation set size with is_PFAS == 1: {len(pfas_labeled_df)}")
 
 import numpy as np
 import pandas as pd
@@ -283,7 +288,7 @@ results_df = pd.DataFrame(results)
 top_results = results_df.sort_values(by="recall", ascending=False)
 
 # Save all results to CSV
-output_path = "./grid_search_results.csv"
+output_path = "/teamspace/studios/this_studio/grid_search_results.csv"
 
 top_results.to_csv(
     output_path,
