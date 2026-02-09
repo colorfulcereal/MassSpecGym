@@ -26,7 +26,7 @@ from dreams.models.dreams.dreams import DreaMS as DreaMSModel
 from torchmetrics.classification import BinaryPrecision, BinaryRecall, BinaryAccuracy
 import numpy as np
 from rdkit import Chem
-from massspecgym.data.transforms import MolToHalogensVector, MolToPFASVector
+from massspecgym.data.transforms import MolToHalogensVector, MolToPFASVector, MolToIsolatedCF3Vector, MolToIsolatedCF2Vector
 import numpy as np
 from pytorch_lightning.loggers import WandbLogger
 from sklearn.metrics import roc_auc_score, average_precision_score
@@ -134,7 +134,7 @@ for i in range(0, num_iterations):
     # Load dataset
     dataset = TestMassSpecDataset(
         spec_transform=SpecTokenizer(n_peaks=n_peaks),
-        mol_transform = MolToPFASVector(),
+        mol_transform = MolToIsolatedCF2Vector(),
         pth='/teamspace/studios/this_studio/files/merged_massspec_nist20_nist_new_with_fold.tsv'
     )
 

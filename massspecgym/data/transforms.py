@@ -446,6 +446,161 @@ class MetaTransform(ABC):
         return self.from_meta(metadata)
 
 
+class MolToIsolatedCF2Vector(MolTransform):
+    
+    def __init__(self):
+        return
+
+    def _is_pf_carbon(self, a: Chem.Atom) -> bool:
+        """Aliphatic carbon with 0 H and 2 or 3 attached fluorines (CF2/CF3)."""
+        if a.GetAtomicNum() != 6 or a.GetIsAromatic():
+            return False
+        if a.GetTotalNumHs() != 0:
+            return False
+        f = sum(1 for n in a.GetNeighbors() if n.GetAtomicNum() == 9)
+        return f in (2, 3)
+
+    def _is_cf2_carbon(self, a: Chem.Atom) -> bool:
+        """Specifically identify CF2 carbons (not CF3)."""
+        if a.GetAtomicNum() != 6 or a.GetIsAromatic():
+            return False
+        if a.GetTotalNumHs() != 0:
+            return False
+        f = sum(1 for n in a.GetNeighbors() if n.GetAtomicNum() == 9)
+        return f == 2
+
+    def _has_isolated_cf2_only(self, mol: Chem.Mol) -> bool:
+        """
+        Check if molecule has CF2 groups that are isolated from other PF-carbons.
+        CF2 can be connected to regular carbons, but not to other CF2/CF3 carbons.
+        Returns True only if:
+        1. There are CF2 carbons present
+        2. NO CF2 carbon is connected to another PF-carbon (CF2/CF3)
+        """
+        # Find all CF2 carbons
+        cf2_carbons = {a.GetIdx() for a in mol.GetAtoms() if self._is_cf2_carbon(a)}
+        
+        if not cf2_carbons:
+            return False  # No CF2 groups found
+            
+        # Find all PF-carbons (CF2 and CF3)
+        all_pf_carbons = {a.GetIdx() for a in mol.GetAtoms() if self._is_pf_carbon(a)}
+        
+        # Check for direct C-C bonds between PF-carbons
+        for b in mol.GetBonds():
+            i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+            # Both atoms must be carbons for this to be a C-C bond
+            atom_i = mol.GetAtomWithIdx(i)
+            atom_j = mol.GetAtomWithIdx(j)
+            if (atom_i.GetAtomicNum() == 6 and atom_j.GetAtomicNum() == 6 and 
+                i in all_pf_carbons and j in all_pf_carbons):
+                return False  # Found PF-carbon to PF-carbon connection
+        
+        # Check for ether bridges between PF-carbons: PF-C -- O -- PF-C
+        for a in mol.GetAtoms():
+            if a.GetAtomicNum() != 8 or a.GetIsAromatic():
+                continue
+            # Get carbon neighbors that are PF-carbons
+            pf_carbon_neighbors = [n.GetIdx() for n in a.GetNeighbors() 
+                                 if n.GetAtomicNum() == 6 and n.GetIdx() in all_pf_carbons]
+            if len(pf_carbon_neighbors) >= 2:
+                return False  # Found PF-carbons connected via ether
+        
+        return True  # All CF2 groups are isolated from other PF-carbons
+
+    def from_smiles(self, smiles: str):
+        """Return 1 if molecule contains only isolated CF2 groups, 0 otherwise."""
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return np.array([0], dtype=np.int32)
+            
+            has_isolated_cf2 = self._has_isolated_cf2_only(mol)
+            return np.array([int(has_isolated_cf2)], dtype=np.int32)
+            
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return np.array([0], dtype=np.int32)
+
+class MolToIsolatedCF3Vector(MolTransform):
+    
+    def __init__(self):
+        return
+
+    def _is_pf_carbon(self, a: Chem.Atom) -> bool:
+        """Aliphatic carbon with 0 H and 2 or 3 attached fluorines (CF2/CF3)."""
+        if a.GetAtomicNum() != 6 or a.GetIsAromatic():
+            return False
+        if a.GetTotalNumHs() != 0:
+            return False
+        f = sum(1 for n in a.GetNeighbors() if n.GetAtomicNum() == 9)
+        return f in (2, 3)
+
+    def _is_cf3_carbon(self, a: Chem.Atom) -> bool:
+        """Specifically identify CF3 carbons (not CF2)."""
+        if a.GetAtomicNum() != 6 or a.GetIsAromatic():
+            return False
+        if a.GetTotalNumHs() != 0:
+            return False
+        f = sum(1 for n in a.GetNeighbors() if n.GetAtomicNum() == 9)
+        return f == 3
+
+    def _has_isolated_cf3_only(self, mol: Chem.Mol) -> bool:
+        """
+        Check if molecule has CF3 groups that are isolated from other PF-carbons.
+        CF3 can be connected to regular carbons, but not to other CF2/CF3 carbons.
+        Returns True only if:
+        1. There are CF3 carbons present
+        2. NO CF3 carbon is connected to another PF-carbon (CF2/CF3)
+        """
+        # Find all CF3 carbons
+        cf3_carbons = {a.GetIdx() for a in mol.GetAtoms() if self._is_cf3_carbon(a)}
+        
+        if not cf3_carbons:
+            return False  # No CF3 groups found
+            
+        # Find all PF-carbons (CF2 and CF3)
+        all_pf_carbons = {a.GetIdx() for a in mol.GetAtoms() if self._is_pf_carbon(a)}
+        
+        # Check for direct C-C bonds between PF-carbons
+        for b in mol.GetBonds():
+            i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+            # Both atoms must be carbons for this to be a C-C bond
+            atom_i = mol.GetAtomWithIdx(i)
+            atom_j = mol.GetAtomWithIdx(j)
+            if (atom_i.GetAtomicNum() == 6 and atom_j.GetAtomicNum() == 6 and 
+                i in all_pf_carbons and j in all_pf_carbons):
+                return False  # Found PF-carbon to PF-carbon connection
+        
+        # Check for ether bridges between PF-carbons: PF-C -- O -- PF-C
+        for a in mol.GetAtoms():
+            if a.GetAtomicNum() != 8 or a.GetIsAromatic():
+                continue
+            # Get carbon neighbors that are PF-carbons
+            pf_carbon_neighbors = [n.GetIdx() for n in a.GetNeighbors() 
+                                 if n.GetAtomicNum() == 6 and n.GetIdx() in all_pf_carbons]
+            if len(pf_carbon_neighbors) >= 2:
+                return False  # Found PF-carbons connected via ether
+        
+        return True  # All CF3 groups are isolated from other PF-carbons
+
+    def from_smiles(self, smiles: str):
+        """Return 1 if molecule contains only isolated CF3 groups, 0 otherwise."""
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return np.array([0], dtype=np.int32)
+            
+            has_isolated_cf3 = self._has_isolated_cf3_only(mol)
+            return np.array([int(has_isolated_cf3)], dtype=np.int32)
+            
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return np.array([0], dtype=np.int32)
+
+
+    
+
 class StandardMeta(MetaTransform):
     
     def __init__(self, adducts: list[str], instrument_types: list[str], max_collision_energy: float):
