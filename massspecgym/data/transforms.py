@@ -590,16 +590,56 @@ class MolToIsolatedCF3Vector(MolTransform):
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
                 return np.array([0], dtype=np.int32)
-            
+
             has_isolated_cf3 = self._has_isolated_cf3_only(mol)
             return np.array([int(has_isolated_cf3)], dtype=np.int32)
-            
+
         except Exception as e:
             print(f"An error occurred: {e}")
             return np.array([0], dtype=np.int32)
 
 
-    
+class MolToFluorinatedTypeVector(MolTransform):
+    """
+    Assigns each molecule to a mutually exclusive fluorinated-carbon class.
+
+    Class mapping:
+      0 - Isolated CF2 only (CF2 groups not connected to other PF-carbons)
+      1 - Isolated CF3 only (CF3 groups not connected to other PF-carbons)
+      2 - PFAS chain (>=2 connected PF-carbons, directly or via ether bridge)
+      3 - None / Other (non-fluorinated, mixed types, or invalid SMILES)
+
+    Priority order: PFAS chain (2) > Isolated CF2 (0) > Isolated CF3 (1) > Other (3)
+
+    Returns np.array([class_index], dtype=np.int32)
+    """
+
+    def __init__(self):
+        self._pfas = MolToPFASVector()
+        self._cf2 = MolToIsolatedCF2Vector()
+        self._cf3 = MolToIsolatedCF3Vector()
+
+    def from_smiles(self, smiles: str):
+        try:
+            # Priority 1: PFAS chain (>=2 connected PF-carbons)
+            if self._pfas.has_pf_chain_ge_2(smiles):
+                return np.array([2], dtype=np.int32)
+            # Parse mol once for isolated-group checks
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return np.array([3], dtype=np.int32)
+            # Priority 2: Isolated CF2 only
+            if self._cf2._has_isolated_cf2_only(mol):
+                return np.array([0], dtype=np.int32)
+            # Priority 3: Isolated CF3 only
+            if self._cf3._has_isolated_cf3_only(mol):
+                return np.array([1], dtype=np.int32)
+            # Default: Other
+            return np.array([3], dtype=np.int32)
+        except Exception as e:
+            print(f"MolToFluorinatedTypeVector error for {smiles}: {e}")
+            return np.array([3], dtype=np.int32)
+
 
 class StandardMeta(MetaTransform):
     

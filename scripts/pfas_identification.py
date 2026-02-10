@@ -3,8 +3,10 @@
 PFAS Identification CLI Tool
 
 Implements the MassQL workflow for PFAS detection:
-- Step 1: Molecular Networking (library-based spectral similarity)
-- Step 2: MassQL Detection (CF2 losses + diagnostic fragments)
+- CF2 losses detection (perfluoroalkyl chains)
+- Diagnostic fragment matching
+- Kendrick Mass Defect analysis (CF2-based)
+- Mass Defect filtering (fluorine abundance pattern)
 
 Usage:
     python scripts/pfas_identification.py \\
@@ -32,168 +34,8 @@ def load_data(filepath, fold):
     return df_fold
 
 
-def load_external_library(filepath):
-    """
-    Load external spectral library (e.g., from MassBank).
-
-    Expected TSV format:
-    - identifier, compound_name, precursor_mz, mzs, intensities, is_PFAS, fold, source
-    """
-    print(f"Loading external library from {filepath}...")
-    df = pd.read_csv(filepath, sep='\t')
-
-    # Validate required columns
-    required_cols = ['identifier', 'precursor_mz', 'mzs', 'intensities', 'is_PFAS']
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        raise ValueError(f"External library missing required columns: {missing_cols}")
-
-    # Ensure is_PFAS is boolean
-    df['is_PFAS'] = df['is_PFAS'].astype(bool)
-
-    print(f"Loaded {len(df)} spectra from external library")
-    if 'source' in df.columns:
-        print(f"  Sources: {df['source'].value_counts().to_dict()}")
-
-    return df
-
-
-def build_hybrid_library(training_df, external_df, mode='hybrid'):
-    """
-    Build hybrid spectral library combining training and external data.
-
-    Args:
-        training_df: Training fold DataFrame
-        external_df: External library DataFrame (e.g., MassBank)
-        mode: 'hybrid' (both), 'external_only', or 'training_only'
-
-    Returns:
-        Combined DataFrame for molecular networking
-    """
-    if mode == 'external_only':
-        print("Using EXTERNAL library only")
-        library = external_df.copy()
-
-    elif mode == 'training_only':
-        print("Using TRAINING fold only")
-        library = training_df.copy()
-
-    else:  # hybrid
-        print("Building HYBRID library (external + training)")
-
-        # Prioritize external library (confirmed PFAS)
-        external_pfas = external_df[external_df['is_PFAS'] == True].copy()
-
-        # Add training data PFAS for dataset-specific patterns
-        training_pfas = training_df[training_df['is_PFAS'] == True].copy()
-
-        # Also include some non-PFAS from training for context
-        training_non_pfas = training_df[training_df['is_PFAS'] == False].sample(
-            n=min(1000, len(training_df[training_df['is_PFAS'] == False])),
-            random_state=42
-        )
-
-        library = pd.concat([
-            external_pfas,
-            training_pfas,
-            training_non_pfas
-        ]).reset_index(drop=True)
-
-        print(f"  - External PFAS: {len(external_pfas)}")
-        print(f"  - Training PFAS: {len(training_pfas)}")
-        print(f"  - Training non-PFAS (context): {len(training_non_pfas)}")
-        print(f"  - Total library size: {len(library)}")
-
-    return library
-
-
 # =============================================================================
-# Step 1: Molecular Networking Functions
-# =============================================================================
-
-def compute_cosine_similarity(mz1, int1, mz2, int2, mz_tolerance=0.01):
-    """
-    Calculate cosine similarity between two spectra.
-
-    Matches peaks within mz_tolerance and computes:
-    similarity = sum(intensity_i * intensity_j) / (norm1 * norm2)
-
-    Args:
-        mz1, int1: First spectrum (m/z and intensity lists)
-        mz2, int2: Second spectrum
-        mz_tolerance: Tolerance for peak matching (Daltons)
-
-    Returns:
-        Cosine similarity score [0, 1]
-    """
-    if len(int1) == 0 or len(int2) == 0:
-        return 0.0
-
-    # Normalize intensities
-    int1_norm = np.array(int1) / np.linalg.norm(int1)
-    int2_norm = np.array(int2) / np.linalg.norm(int2)
-
-    # Match peaks and compute dot product
-    dot_product = 0.0
-    for i, mz_i in enumerate(mz1):
-        for j, mz_j in enumerate(mz2):
-            if abs(mz_i - mz_j) <= mz_tolerance:
-                dot_product += int1_norm[i] * int2_norm[j]
-
-    return dot_product
-
-
-def query_against_library(query_df, library_df, similarity_threshold=0.7):
-    """
-    Query validation spectra against spectral library.
-
-    For each query spectrum, find matching library spectra and propagate
-    PFAS labels from library matches.
-
-    Args:
-        query_df: DataFrame with query spectra (validation fold)
-        library_df: DataFrame with library spectra (training fold with is_PFAS labels)
-        similarity_threshold: Minimum similarity for library match
-
-    Returns:
-        dict: {query_identifier: network_pfas_score}
-    """
-    network_scores = {}
-
-    print(f"Querying {len(query_df)} validation spectra against {len(library_df)} library spectra...")
-
-    for idx, query_row in query_df.iterrows():
-        if idx % 50 == 0:
-            print(f"  Querying spectrum {idx}/{len(query_df)}")
-
-        query_id = query_row['identifier']
-        query_mz = query_row['mzs_parsed']
-        query_int = query_row['intensities_parsed']
-
-        # Find library matches
-        pfas_matches = 0
-        total_matches = 0
-
-        for _, lib_row in library_df.iterrows():
-            sim = compute_cosine_similarity(
-                query_mz, query_int,
-                lib_row['mzs_parsed'],
-                lib_row['intensities_parsed']
-            )
-
-            if sim >= similarity_threshold:
-                total_matches += 1
-                if lib_row['is_PFAS']:
-                    pfas_matches += 1
-
-        # Network score: proportion of PFAS matches in library
-        network_scores[query_id] = pfas_matches / total_matches if total_matches > 0 else 0.0
-
-    return network_scores
-
-
-# =============================================================================
-# Step 2: MassQL Detection Functions
+# MassQL Detection Functions
 # =============================================================================
 
 def find_peak_within_tolerance(target_mz, mz_list, ppm_tol):
@@ -273,6 +115,28 @@ def detect_diagnostic_fragments(mzs, intensities, ppm_tol=10, min_rel_int=0.01):
     }
 
 
+def calculate_mass_defect(precursor_mz):
+    """
+    Calculate regular mass defect for PFAS detection.
+
+    Mass defect is the fractional part of the exact mass.
+    PFAS compounds typically have mass defects in the range 0.9-0.99
+    due to the high fluorine content (F = 18.998 Da).
+
+    Example: 450.9234 Da → mass defect = 0.9234
+
+    This is complementary to Kendrick Mass Defect and is used in
+    ion mobility-based PFAS screening (MassQL approach).
+
+    Args:
+        precursor_mz: Precursor m/z value
+
+    Returns:
+        float: Mass defect (fractional part of mass)
+    """
+    return precursor_mz - int(precursor_mz)
+
+
 def calculate_kendrick_mass_defect(precursor_mz, base='CF2'):
     """
     Calculate Kendrick Mass Defect (KMD) for PFAS detection.
@@ -322,7 +186,8 @@ def calculate_kendrick_mass_defect(precursor_mz, base='CF2'):
     }
 
 
-def compute_pfas_score(row, ppm_tol=10, min_intensity=0.01, network_score=0.0, use_network=True, use_kmd=True, kmd_threshold=0.15):
+def compute_pfas_score(row, ppm_tol=10, min_intensity=0.01, use_kmd=True, kmd_threshold=0.15,
+                       use_mass_defect=True, mass_defect_min=0.9, mass_defect_max=0.99):
     """
     Combine detection methods into overall PFAS score.
 
@@ -330,7 +195,7 @@ def compute_pfas_score(row, ppm_tol=10, min_intensity=0.01, network_score=0.0, u
     - CF2 losses: 2 points per detected CF2 unit
     - Diagnostic fragments: 3 points per matched fragment
     - Kendrick Mass Defect: 4 points if |KMD| <= threshold (default 0.15)
-    - Network evidence: 5 points if network_score > 0.5 (connected to known PFAS)
+    - Mass Defect: 3 points if mass defect in PFAS range (default 0.9-0.99)
     - Threshold: score >= 5 indicates PFAS
     """
     mzs = row['mzs_parsed']
@@ -359,12 +224,15 @@ def compute_pfas_score(row, ppm_tol=10, min_intensity=0.01, network_score=0.0, u
         kmd_value = None
         kendrick_mass = None
 
-    # Network evidence (if enabled)
-    network_contribution = 0
-    if use_network and network_score > 0.5:
-        network_contribution = 5
+    # Mass Defect filtering (complementary to KMD)
+    mass_defect_score = 0
+    mass_defect_value = calculate_mass_defect(precursor)
+    if use_mass_defect:
+        # PFAS typically have mass defects between 0.9-0.99 due to fluorine content
+        if mass_defect_min <= mass_defect_value <= mass_defect_max:
+            mass_defect_score = 3
 
-    total_score = cf2_score + frag_score + kmd_score + network_contribution
+    total_score = cf2_score + frag_score + kmd_score + mass_defect_score
 
     return {
         'cf2_score': cf2_score,
@@ -372,8 +240,8 @@ def compute_pfas_score(row, ppm_tol=10, min_intensity=0.01, network_score=0.0, u
         'kmd_score': kmd_score,
         'kmd': kmd_value,
         'kendrick_mass': kendrick_mass,
-        'network_score': network_score,
-        'network_contribution': network_contribution,
+        'mass_defect_score': mass_defect_score,
+        'mass_defect': mass_defect_value,
         'matched_fragments': str(frag_result['matched_fragments']),
         'total_score': total_score,
         'predicted_pfas': total_score >= 5
@@ -394,35 +262,28 @@ def compute_metrics(y_true, y_pred):
     }
 
 
-def generate_report(df_results, metrics, args, network_stats):
+def generate_report(df_results, metrics, args):
     """Generate formatted text report."""
     with open(args.report, 'w') as f:
         f.write("PFAS Identification Results\n")
         f.write("============================\n")
         f.write(f"Input: {args.input}\n")
         f.write(f"Fold: {args.fold}\n")
-        f.write(f"Method: MassQL with Molecular Networking\n")
+        f.write(f"Method: MassQL\n")
         f.write(f"Samples: {len(df_results)}\n\n")
 
         f.write("Workflow:\n")
-        f.write("Step 1: Molecular Networking (Library-Based)\n")
-        if args.use_network_propagation:
-            f.write(f"  - Spectral library: Training fold ({network_stats['library_size']} spectra)\n")
-            f.write(f"  - Query spectra: Validation fold ({len(df_results)} spectra)\n")
-            f.write(f"  - Similarity threshold: {args.network_similarity_threshold}\n")
-            f.write(f"  - Validation spectra with library matches: {network_stats['queries_with_matches']}\n")
-            f.write(f"  - Average library matches per query: {network_stats['avg_matches']:.2f}\n")
-        else:
-            f.write("  - Disabled\n")
-        f.write("\n")
-
-        f.write("Step 2: MassQL Detection\n")
+        f.write("MassQL Detection Methods:\n")
         f.write("  - CF2 loss detection (perfluoroalkyl chains)\n")
         f.write("  - Diagnostic fragment matching\n")
         if args.use_kmd:
             f.write(f"  - Kendrick Mass Defect analysis (CF2 base, threshold={args.kmd_threshold})\n")
         else:
             f.write("  - Kendrick Mass Defect: Disabled\n")
+        if args.use_mass_defect:
+            f.write(f"  - Mass Defect filtering (range: {args.mass_defect_min}-{args.mass_defect_max})\n")
+        else:
+            f.write("  - Mass Defect filtering: Disabled\n")
         f.write("\n")
 
         f.write("Parameters:\n")
@@ -432,7 +293,8 @@ def generate_report(df_results, metrics, args, network_stats):
         f.write("- Fragment score weight: 3\n")
         if args.use_kmd:
             f.write(f"- KMD score weight: 4 (if |KMD| <= {args.kmd_threshold})\n")
-        f.write("- Network score weight: 5 (if network_score > 0.5)\n")
+        if args.use_mass_defect:
+            f.write(f"- Mass Defect score weight: 3 (if {args.mass_defect_min} <= MD <= {args.mass_defect_max})\n")
         f.write("- Score threshold: 5\n\n")
 
         f.write("Diagnostic Fragments:\n")
@@ -474,15 +336,15 @@ def generate_report(df_results, metrics, args, network_stats):
             f.write(f"- Average |KMD| for predicted PFAS: {abs(avg_kmd_pfas):.4f}\n")
             f.write(f"- Average |KMD| for predicted non-PFAS: {abs(avg_kmd_non_pfas):.4f}\n\n")
 
-        # Network contribution
-        if args.use_network_propagation:
-            network_evidence = (df_results['network_contribution'] > 0).sum()
-            network_only = ((df_results['cf2_score'] == 0) &
-                          (df_results['fragment_score'] == 0) &
-                          (df_results['predicted_pfas'] == True)).sum()
-            f.write("Network Contribution:\n")
-            f.write(f"- Samples with network evidence: {network_evidence}\n")
-            f.write(f"- Network-only predictions (no CF2/fragments): {network_only}\n")
+        # Mass Defect statistics
+        if args.use_mass_defect:
+            md_evidence = (df_results['mass_defect_score'] > 0).sum()
+            avg_md_pfas = df_results[df_results['predicted_pfas'] == True]['mass_defect'].mean()
+            avg_md_non_pfas = df_results[df_results['predicted_pfas'] == False]['mass_defect'].mean()
+            f.write("Mass Defect Analysis:\n")
+            f.write(f"- Samples with mass defect in PFAS range ({args.mass_defect_min}-{args.mass_defect_max}): {md_evidence}\n")
+            f.write(f"- Average mass defect for predicted PFAS: {avg_md_pfas:.4f}\n")
+            f.write(f"- Average mass defect for predicted non-PFAS: {avg_md_non_pfas:.4f}\n\n")
 
 
 # =============================================================================
@@ -505,25 +367,20 @@ def main():
                        help='Fragment matching tolerance in ppm (default: 10)')
     parser.add_argument('--min_intensity', type=float, default=0.01,
                        help='Minimum relative intensity threshold (default: 0.01)')
-    parser.add_argument('--network_similarity_threshold', type=float, default=0.7,
-                       help='Cosine similarity threshold for networking (default: 0.7)')
-    parser.add_argument('--use_network_propagation', type=lambda x: x.lower() != 'false',
-                       default=True,
-                       help='Use molecular network to propagate PFAS labels (default: True)')
     parser.add_argument('--use_kmd', type=lambda x: x.lower() != 'false',
                        default=True,
                        help='Use Kendrick Mass Defect filtering for PFAS detection (default: True)')
     parser.add_argument('--kmd_threshold', type=float, default=0.15,
                        help='KMD threshold for PFAS classification (default: 0.15)')
+    parser.add_argument('--use_mass_defect', type=lambda x: x.lower() != 'false',
+                       default=True,
+                       help='Use Mass Defect filtering for PFAS detection (default: True)')
+    parser.add_argument('--mass_defect_min', type=float, default=0.9,
+                       help='Minimum mass defect for PFAS classification (default: 0.9)')
+    parser.add_argument('--mass_defect_max', type=float, default=0.99,
+                       help='Maximum mass defect for PFAS classification (default: 0.99)')
     parser.add_argument('--max_samples', type=int, default=None,
                        help='Maximum number of validation samples to process (default: None = all)')
-    parser.add_argument('--library_sample_size', type=int, default=None,
-                       help='Number of training samples to use as library (default: None = all)')
-    parser.add_argument('--external_library', type=str, default=None,
-                       help='Path to external spectral library TSV (e.g., MassBank PFAS library)')
-    parser.add_argument('--library_mode', type=str, default='hybrid',
-                       choices=['hybrid', 'external_only', 'training_only'],
-                       help='Library mode: hybrid (external+training), external_only, or training_only (default: hybrid)')
 
     args = parser.parse_args()
 
@@ -548,85 +405,31 @@ def main():
     df_val['mzs_parsed'] = df_val['mzs'].apply(lambda x: [float(v) for v in x.split(',')])
     df_val['intensities_parsed'] = df_val['intensities'].apply(lambda x: [float(v) for v in x.split(',')])
 
-    # Step 1: Molecular Networking (if enabled)
-    network_scores = {}
-    network_stats = {'library_size': 0, 'queries_with_matches': 0, 'avg_matches': 0.0}
-
-    if args.use_network_propagation:
-        print("\n" + "=" * 80)
-        print("Step 1: Molecular Networking")
-        print("=" * 80)
-
-        # Load external library if provided
-        external_lib = None
-        if args.external_library:
-            external_lib = load_external_library(args.external_library)
-            # Parse spectra
-            external_lib['mzs_parsed'] = external_lib['mzs'].apply(lambda x: [float(v) for v in x.split(',')])
-            external_lib['intensities_parsed'] = external_lib['intensities'].apply(lambda x: [float(v) for v in x.split(',')])
-
-        # Load training fold
-        df_train = load_data(args.input, 'train')
-        print(f"Loaded {len(df_train)} training spectra")
-
-        # Parse training spectra
-        df_train['mzs_parsed'] = df_train['mzs'].apply(lambda x: [float(v) for v in x.split(',')])
-        df_train['intensities_parsed'] = df_train['intensities'].apply(lambda x: [float(v) for v in x.split(',')])
-
-        # Build library based on mode
-        if external_lib is not None:
-            library_df = build_hybrid_library(df_train, external_lib, mode=args.library_mode)
-        else:
-            print("Using TRAINING fold only (no external library)")
-            library_df = df_train
-
-        # Sample library if requested (after hybrid building)
-        if args.library_sample_size is not None and args.library_sample_size < len(library_df):
-            print(f"Sampling {args.library_sample_size} library spectra for faster processing...")
-            library_df = library_df.sample(n=args.library_sample_size, random_state=42).reset_index(drop=True)
-
-        print(f"Final library size: {len(library_df)} spectra\n")
-
-        # Query validation spectra against library
-        network_scores = query_against_library(
-            df_val, library_df, args.network_similarity_threshold
-        )
-
-        # Calculate network stats
-        network_stats['library_size'] = len(library_df)
-        network_stats['queries_with_matches'] = sum(1 for s in network_scores.values() if s > 0)
-        network_stats['avg_matches'] = np.mean([s for s in network_scores.values()])
-
-        print(f"\nNetwork summary:")
-        print(f"  - {network_stats['queries_with_matches']}/{len(df_val)} queries have library matches")
-        print(f"  - Average PFAS score from network: {network_stats['avg_matches']:.3f}")
-    else:
-        print("\nMolecular networking disabled")
-        network_scores = {row['identifier']: 0.0 for _, row in df_val.iterrows()}
-
-    # Step 2: Run MassQL PFAS detection
+    # Run MassQL PFAS detection
     print("\n" + "=" * 80)
-    print("Step 2: MassQL PFAS Detection")
+    print("MassQL PFAS Detection")
     print("=" * 80)
+    methods = ["CF2 loss detection", "diagnostic fragment matching"]
     if args.use_kmd:
-        print(f"Running CF2 loss detection, diagnostic fragment matching, and Kendrick Mass Defect analysis...\n")
-    else:
-        print("Running CF2 loss detection and diagnostic fragment matching...\n")
+        methods.append("Kendrick Mass Defect analysis")
+    if args.use_mass_defect:
+        methods.append(f"Mass Defect filtering ({args.mass_defect_min}-{args.mass_defect_max})")
+    print(f"Running {', '.join(methods)}...\n")
 
     results = []
     for idx, row in df_val.iterrows():
         if idx % 100 == 0:
             print(f"  Processing spectrum {idx}/{len(df_val)}")
 
-        net_score = network_scores.get(row['identifier'], 0.0)
         result = compute_pfas_score(
             row,
             ppm_tol=args.ppm_tol,
             min_intensity=args.min_intensity,
-            network_score=net_score,
-            use_network=args.use_network_propagation,
             use_kmd=args.use_kmd,
-            kmd_threshold=args.kmd_threshold
+            kmd_threshold=args.kmd_threshold,
+            use_mass_defect=args.use_mass_defect,
+            mass_defect_min=args.mass_defect_min,
+            mass_defect_max=args.mass_defect_max
         )
         results.append(result)
 
@@ -637,7 +440,7 @@ def main():
     print(f"Saving predictions to {args.output}...")
     output_cols = ['identifier', 'is_PFAS', 'total_score', 'predicted_pfas',
                    'cf2_score', 'fragment_score', 'kmd_score', 'kmd', 'kendrick_mass',
-                   'network_score', 'matched_fragments']
+                   'mass_defect_score', 'mass_defect', 'matched_fragments']
     df_results[output_cols].to_csv(args.output, sep='\t', index=False)
     print(f"Saved {len(df_results)} predictions")
 
@@ -657,7 +460,7 @@ def main():
     # Generate report
     if args.report:
         print(f"\nGenerating detailed report to {args.report}...")
-        generate_report(df_results, metrics, args, network_stats)
+        generate_report(df_results, metrics, args)
         print("Report generated successfully")
 
     print("\n" + "=" * 80)
