@@ -604,12 +604,12 @@ class MolToFluorinatedTypeVector(MolTransform):
     Assigns each molecule to a mutually exclusive fluorinated-carbon class.
 
     Class mapping:
-      0 - Isolated CF2 only (CF2 groups not connected to other PF-carbons)
-      1 - Isolated CF3 only (CF3 groups not connected to other PF-carbons)
-      2 - PFAS chain (>=2 connected PF-carbons, directly or via ether bridge)
-      3 - None / Other (non-fluorinated, mixed types, or invalid SMILES)
+      0 - Isolated CF2 or CF3 (has isolated CF2 and/or CF3, no PFAS chain)
+      1 - PFAS chain (>=2 connected PF-carbons, directly or via ether bridge)
+      2 - Other fluorine (contains F but not isolated CF2/CF3 or PFAS chain)
+      3 - Non-fluorinated (no fluorine atoms, or invalid SMILES)
 
-    Priority order: PFAS chain (2) > Isolated CF2 (0) > Isolated CF3 (1) > Other (3)
+    Priority order: PFAS chain (1) > Isolated CF2/CF3 (0) > Other F (2) > Non-F (3)
 
     Returns np.array([class_index], dtype=np.int32)
     """
@@ -623,18 +623,19 @@ class MolToFluorinatedTypeVector(MolTransform):
         try:
             # Priority 1: PFAS chain (>=2 connected PF-carbons)
             if self._pfas.has_pf_chain_ge_2(smiles):
-                return np.array([2], dtype=np.int32)
-            # Parse mol once for isolated-group checks
+                return np.array([1], dtype=np.int32)
+            # Parse mol once for remaining checks
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
                 return np.array([3], dtype=np.int32)
-            # Priority 2: Isolated CF2 only
-            if self._cf2._has_isolated_cf2_only(mol):
+            # Priority 2: Isolated CF2 or CF3
+            if self._cf2._has_isolated_cf2_only(mol) or self._cf3._has_isolated_cf3_only(mol):
                 return np.array([0], dtype=np.int32)
-            # Priority 3: Isolated CF3 only
-            if self._cf3._has_isolated_cf3_only(mol):
-                return np.array([1], dtype=np.int32)
-            # Default: Other
+            # Priority 3: Other fluorine (has F but not CF2/CF3/PFAS)
+            has_fluorine = any(a.GetAtomicNum() == 9 for a in mol.GetAtoms())
+            if has_fluorine:
+                return np.array([2], dtype=np.int32)
+            # Default: Non-fluorinated
             return np.array([3], dtype=np.int32)
         except Exception as e:
             print(f"MolToFluorinatedTypeVector error for {smiles}: {e}")

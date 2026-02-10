@@ -51,7 +51,7 @@ else:
 
 
 # Class names for reporting
-CLASS_NAMES = ["Isolated CF2", "Isolated CF3", "PFAS Chain", "Other"]
+CLASS_NAMES = ["Isolated CF2/CF3", "PFAS Chain", "Other Fluorine", "Non-Fluorinated"]
 NUM_CLASSES = 4
 
 
