@@ -271,6 +271,9 @@ def parse_args():
                         "If provided, a two-panel before/after plot is produced.")
     p.add_argument("--out", default="results/plots/umap_embeddings.png")
     p.add_argument("--method", choices=["umap", "tsne"], default="umap")
+    p.add_argument("--n_pfas", type=int, default=3000,
+                   help="Total PFAS spectra to sample, drawn proportionally per subclass "
+                        "(default 3000, matching n_nonpfas for a balanced plot)")
     p.add_argument("--n_nonpfas", type=int, default=3000,
                    help="Number of non-PFAS spectra to sample (default 3000)")
     p.add_argument("--batch_size", type=int, default=128)
@@ -303,18 +306,34 @@ def main():
     if args.fold != "all":
         df = df[df["fold"] == args.fold]
 
-    pfas_df = df[df["is_PFAS"]].copy()
+    # ── Label all PFAS rows first (needed for proportional sampling) ──────────
+    pfas_all = df[df["is_PFAS"]].copy()
+    pfas_all["subclass"] = pfas_all["smiles"].apply(classify_pfas_subclass)
+
+    # Sample PFAS proportionally per subclass so rare subclasses aren't
+    # swamped by the dominant FT acrylate/methacrylate group
+    subclass_counts = pfas_all["subclass"].value_counts()
+    total_pfas = len(pfas_all)
+    pfas_parts = []
+    for subclass, count in subclass_counts.items():
+        n_take = max(1, round(args.n_pfas * count / total_pfas))
+        n_take = min(n_take, count)
+        pfas_parts.append(
+            pfas_all[pfas_all["subclass"] == subclass].sample(n=n_take, random_state=args.seed)
+        )
+    pfas_df = pd.concat(pfas_parts, ignore_index=True)
+
     nonpfas_df = df[~df["is_PFAS"]].sample(
         n=min(args.n_nonpfas, (~df["is_PFAS"]).sum()), random_state=args.seed
     )
+    nonpfas_df = nonpfas_df.copy()
+    nonpfas_df["subclass"] = NON_PFAS_LABEL
+
     sample_df = pd.concat([pfas_df, nonpfas_df], ignore_index=True)
     print(f"Sample: {len(pfas_df):,} PFAS + {len(nonpfas_df):,} non-PFAS = {len(sample_df):,} total")
 
     # ── Build labels ──────────────────────────────────────────────────────────
-    labels = [
-        classify_pfas_subclass(row["smiles"]) if row["is_PFAS"] else NON_PFAS_LABEL
-        for _, row in sample_df.iterrows()
-    ]
+    labels = sample_df["subclass"].tolist()
     print("Label distribution:", Counter(labels))
 
     # ── Dataset ───────────────────────────────────────────────────────────────
