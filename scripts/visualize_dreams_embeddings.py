@@ -1,5 +1,14 @@
 """
-Visualize DreaMS embeddings with UMAP / t-SNE, colored by PFAS class.
+Visualize DreaMS embeddings with UMAP / t-SNE, colored by PFAS chemical subclass.
+
+PFAS subclasses are assigned by priority-ordered SMARTS matching:
+  Fluorotelomer phosphate   — [#8]P(=O)
+  PFAS sulfonamide          — S(=O)(=O)N
+  FT thioacrylate           — [CH2]=[C]C(=O)S
+  FT acrylate/methacrylate  — [CH2]=[C]C(=O)O
+  Nitroaromatic PFAS        — [N+](=O)[O-]
+  PFAS betaine              — [NX4+]
+  Other PFAS                — catch-all
 
 Usage (on GPU environment):
     # Pretrained DreaMS only:
@@ -11,14 +20,14 @@ Usage (on GPU environment):
     python scripts/visualize_dreams_embeddings.py \
         --data /path/to/merged_massspec_nist20_nist_new_env_pfas_with_fold.tsv \
         --finetuned_ckpt /path/to/checkpoint.ckpt \
-        --out results/plots/umap_embeddings.png
+        --out results/plots/umap_before_after.png
 
     # Use t-SNE instead of UMAP:
     python scripts/visualize_dreams_embeddings.py --method tsne ...
 """
 
 import argparse
-import sys
+from collections import Counter
 from pathlib import Path
 
 import matchms
@@ -34,34 +43,57 @@ from dreams.api import PreTrainedModel
 from dreams.models.dreams.dreams import DreaMS as DreaMSModel
 
 
-# ── PFAS subclass labels ──────────────────────────────────────────────────────
+# ── PFAS subclass classification ──────────────────────────────────────────────
+
+# Priority-ordered: first match wins
+_SUBCLASS_SMARTS = [
+    ("Fluorotelomer phosphate",  "[#8]P(=O)"),
+    ("PFAS sulfonamide",         "S(=O)(=O)N"),
+    ("FT thioacrylate",          "[CH2]=[C]C(=O)S"),
+    ("FT acrylate/methacrylate", "[CH2]=[C]C(=O)O"),
+    ("Nitroaromatic PFAS",       "[N+](=O)[O-]"),
+    ("PFAS betaine",             "[NX4+]"),
+]
+_COMPILED = [(name, Chem.MolFromSmarts(s)) for name, s in _SUBCLASS_SMARTS]
+
+NON_PFAS_LABEL = "Non-PFAS"
 
 def classify_pfas_subclass(smiles: str) -> str:
-    """Derive a coarse PFAS subclass from SMILES."""
-    import re
-    if not smiles or smiles == "nan":
-        return "Other PFAS"
-    mol = Chem.MolFromSmiles(smiles)
+    """Assign a PFAS chemical subclass via priority-ordered SMARTS matching."""
+    mol = Chem.MolFromSmiles(str(smiles)) if smiles else None
     if mol is None:
         return "Other PFAS"
-    f_count = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 9)
-    if f_count < 4:
-        return "Other PFAS"
-    if re.search(r'C\(=O\)O|C\(=O\)\[O', smiles):
-        return "PFCA (e.g. PFOA)"
-    if re.search(r'S\(=O\)', smiles):
-        return "PFSA (e.g. PFOS)"
-    if re.search(r'P\(=O\)', smiles):
-        return "Fluorotelomer phosphate"
+    for name, pat in _COMPILED:
+        if mol.HasSubstructMatch(pat):
+            return name
     return "Other PFAS"
+
+
+# ── Plotting config ───────────────────────────────────────────────────────────
+
+LABEL_COLORS = {
+    NON_PFAS_LABEL:              "#cccccc",
+    "FT acrylate/methacrylate":  "#e63946",
+    "Nitroaromatic PFAS":        "#f4a261",
+    "PFAS sulfonamide":          "#2a9d8f",
+    "Fluorotelomer phosphate":   "#457b9d",
+    "FT thioacrylate":           "#a8dadc",
+    "PFAS betaine":              "#6a4c93",
+    "Other PFAS":                "#f1c40f",
+}
+LABEL_SIZES = {k: (4 if k == NON_PFAS_LABEL else 20) for k in LABEL_COLORS}
+LABEL_ALPHA = {k: (0.20 if k == NON_PFAS_LABEL else 0.88) for k in LABEL_COLORS}
+
+# Non-PFAS drawn first so PFAS points sit on top
+LABEL_ORDER = [NON_PFAS_LABEL] + [k for k in LABEL_COLORS if k != NON_PFAS_LABEL]
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
 class RawSpecDataset(Dataset):
     """
-    Builds matchms Spectrum objects from raw mzs/intensities strings in the TSV
-    and applies SpecTokenizer on the fly.
+    Reconstructs matchms Spectrum objects from raw comma-separated mzs/intensities
+    strings in the TSV and applies SpecTokenizer on the fly.
     """
 
     def __init__(self, df: pd.DataFrame, n_peaks: int = 60):
@@ -105,16 +137,27 @@ def load_pretrained_backbone() -> nn.Module:
 
 
 def load_finetuned_backbone(ckpt_path: str) -> nn.Module:
-    """Load the fine-tuned FluorineDetectorDreamsTest and return its DreaMS backbone."""
-    # Import here to avoid polluting the namespace
-    sys.path.insert(0, str(Path(__file__).parent))
-    from train_fluorinated_molecules_model import FluorineDetectorDreamsTest
+    """
+    Load fine-tuned DreaMS backbone from a Lightning checkpoint without
+    importing the training script (which runs training at module level).
 
-    model = FluorineDetectorDreamsTest.load_from_checkpoint(
-        ckpt_path, map_location="cpu"
-    )
-    backbone = model.main_model.eval()
-    return backbone
+    Checkpoint keys:
+      main_model.*  — DreaMS backbone (kept)
+      lin_out.*     — classification head (discarded)
+    """
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    backbone_sd = {
+        k[len("main_model."):]: v
+        for k, v in ckpt["state_dict"].items()
+        if k.startswith("main_model.")
+    }
+    backbone = load_pretrained_backbone()
+    missing, unexpected = backbone.load_state_dict(backbone_sd, strict=False)
+    if missing:
+        print(f"  [warn] missing keys: {missing[:5]}")
+    if unexpected:
+        print(f"  [warn] unexpected keys: {unexpected[:5]}")
+    return backbone.eval()
 
 
 @torch.no_grad()
@@ -124,13 +167,12 @@ def extract_embeddings(
     batch_size: int = 128,
     device: torch.device = torch.device("cpu"),
 ) -> np.ndarray:
-    """Run forward pass and collect CLS token embeddings [N, 1024]."""
+    """Forward pass → CLS token embeddings [N, 1024]."""
     backbone = backbone.to(device)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
     all_embs = []
     for batch in loader:
-        batch = batch.to(device)               # [B, n_peaks+1, 2]
-        emb = backbone(batch)[:, 0, :]         # CLS token [B, 1024]
+        emb = backbone(batch.to(device))[:, 0, :]   # [B, 1024]
         all_embs.append(emb.cpu().float().numpy())
     return np.vstack(all_embs)
 
@@ -140,79 +182,37 @@ def extract_embeddings(
 def reduce_embeddings(embeddings: np.ndarray, method: str = "umap") -> np.ndarray:
     if method == "umap":
         import umap
-        reducer = umap.UMAP(
-            n_components=2,
-            n_neighbors=30,
-            min_dist=0.1,
-            metric="cosine",
-            random_state=42,
-            verbose=True,
-        )
-        return reducer.fit_transform(embeddings)
+        return umap.UMAP(
+            n_components=2, n_neighbors=30, min_dist=0.1,
+            metric="cosine", random_state=42, verbose=True,
+        ).fit_transform(embeddings)
     elif method == "tsne":
         from sklearn.manifold import TSNE
-        reducer = TSNE(
-            n_components=2,
-            perplexity=30,
-            n_iter=1000,
-            metric="cosine",
-            random_state=42,
-            verbose=1,
-        )
-        return reducer.fit_transform(embeddings)
+        return TSNE(
+            n_components=2, perplexity=30, n_iter=1000,
+            metric="cosine", random_state=42, verbose=1,
+        ).fit_transform(embeddings)
     else:
         raise ValueError(f"Unknown method: {method}. Choose 'umap' or 'tsne'.")
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
-# Color palette — non-PFAS as neutral gray, PFAS subclasses as vivid colors
-LABEL_COLORS = {
-    "Non-PFAS":                 "#cccccc",
-    "PFCA (e.g. PFOA)":         "#e63946",
-    "PFSA (e.g. PFOS)":         "#f4a261",
-    "Fluorotelomer phosphate":  "#2a9d8f",
-    "Other PFAS":               "#457b9d",
-}
-LABEL_SIZES = {
-    "Non-PFAS": 4,
-    "PFCA (e.g. PFOA)": 18,
-    "PFSA (e.g. PFOS)": 18,
-    "Fluorotelomer phosphate": 18,
-    "Other PFAS": 18,
-}
-LABEL_ALPHA = {
-    "Non-PFAS": 0.25,
-    "PFCA (e.g. PFOA)": 0.9,
-    "PFSA (e.g. PFOS)": 0.9,
-    "Fluorotelomer phosphate": 0.9,
-    "Other PFAS": 0.9,
-}
-LABEL_ORDER = [
-    "Non-PFAS",
-    "Other PFAS",
-    "Fluorotelomer phosphate",
-    "PFSA (e.g. PFOS)",
-    "PFCA (e.g. PFOA)",
-]
-
-
 def _plot_single(ax, coords: np.ndarray, labels: list, title: str, method: str):
     import matplotlib.patches as mpatches
 
     label_arr = np.array(labels)
+    present = set(labels)
     for lab in LABEL_ORDER:
-        mask = label_arr == lab
-        if mask.sum() == 0:
+        if lab not in present:
             continue
+        mask = label_arr == lab
         ax.scatter(
-            coords[mask, 0],
-            coords[mask, 1],
+            coords[mask, 0], coords[mask, 1],
             c=LABEL_COLORS[lab],
             s=LABEL_SIZES[lab],
             alpha=LABEL_ALPHA[lab],
             linewidths=0,
-            label=lab,
             rasterized=True,
         )
 
@@ -221,13 +221,11 @@ def _plot_single(ax, coords: np.ndarray, labels: list, title: str, method: str):
     ax.set_ylabel(f"{method.upper()} 2", fontsize=10)
     ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
 
-    # Legend (only PFAS labels)
     handles = [
         mpatches.Patch(color=LABEL_COLORS[lab], label=lab)
-        for lab in LABEL_ORDER
-        if lab in set(labels)
+        for lab in LABEL_ORDER if lab in present
     ]
-    ax.legend(handles=handles, fontsize=8, loc="best", markerscale=1.5, framealpha=0.8)
+    ax.legend(handles=handles, fontsize=8, loc="best", framealpha=0.85)
 
 
 def make_plot(
@@ -250,12 +248,11 @@ def make_plot(
     if coords_finetuned is not None:
         _plot_single(axes[1], coords_finetuned, labels, "Fine-tuned DreaMS", method)
 
-    n_pfas = sum(1 for l in labels if l != "Non-PFAS")
-    n_total = len(labels)
+    n_pfas = sum(1 for l in labels if l != NON_PFAS_LABEL)
     fig.suptitle(
-        f"DreaMS Embeddings — {method.upper()}  |  n={n_total:,} ({n_pfas:,} PFAS)",
-        fontsize=14,
-        y=1.01,
+        f"DreaMS Embeddings — {method.upper()}  |  "
+        f"n={len(labels):,}  ({n_pfas:,} PFAS by chemical subclass)",
+        fontsize=14, y=1.01,
     )
     plt.tight_layout()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -296,7 +293,7 @@ def main():
     )
     print(f"Using device: {device}")
 
-    # ── Load & sample data ────────────────────────────────────────────────────
+    # ── Load & sample ─────────────────────────────────────────────────────────
     print("Loading data...")
     cols = ["identifier", "mzs", "intensities", "precursor_mz", "smiles", "is_PFAS", "fold"]
     df = pd.read_csv(args.data, sep="\t", usecols=cols, low_memory=False)
@@ -307,34 +304,28 @@ def main():
 
     pfas_df = df[df["is_PFAS"]].copy()
     nonpfas_df = df[~df["is_PFAS"]].sample(
-        n=min(args.n_nonpfas, len(df[~df["is_PFAS"]])), random_state=args.seed
+        n=min(args.n_nonpfas, (~df["is_PFAS"]).sum()), random_state=args.seed
     )
     sample_df = pd.concat([pfas_df, nonpfas_df], ignore_index=True)
-
     print(f"Sample: {len(pfas_df):,} PFAS + {len(nonpfas_df):,} non-PFAS = {len(sample_df):,} total")
 
     # ── Build labels ──────────────────────────────────────────────────────────
-    labels = []
-    for _, row in sample_df.iterrows():
-        if not row["is_PFAS"]:
-            labels.append("Non-PFAS")
-        else:
-            labels.append(classify_pfas_subclass(str(row["smiles"])))
-
-    from collections import Counter
+    labels = [
+        classify_pfas_subclass(row["smiles"]) if row["is_PFAS"] else NON_PFAS_LABEL
+        for _, row in sample_df.iterrows()
+    ]
     print("Label distribution:", Counter(labels))
 
-    # ── Build dataset ─────────────────────────────────────────────────────────
+    # ── Dataset ───────────────────────────────────────────────────────────────
     dataset = RawSpecDataset(sample_df, n_peaks=args.n_peaks)
 
-    # ── Extract embeddings (pretrained) ───────────────────────────────────────
+    # ── Embeddings ────────────────────────────────────────────────────────────
     print("\nLoading pretrained DreaMS backbone...")
     backbone_pre = load_pretrained_backbone()
     print("Extracting pretrained embeddings...")
     emb_pre = extract_embeddings(backbone_pre, dataset, args.batch_size, device)
     print(f"Embeddings shape: {emb_pre.shape}")
 
-    # ── Extract embeddings (fine-tuned, optional) ─────────────────────────────
     emb_ft = None
     if args.finetuned_ckpt:
         print(f"\nLoading fine-tuned checkpoint: {args.finetuned_ckpt}")
@@ -354,7 +345,7 @@ def main():
     # ── Plot ──────────────────────────────────────────────────────────────────
     make_plot(coords_pre, labels, args.method, args.out, coords_finetuned=coords_ft)
 
-    # Also save embeddings + labels for further analysis
+    # Save raw embeddings + coords for further analysis
     emb_out = Path(args.out).with_suffix(".npz")
     save_dict = {
         "emb_pretrained": emb_pre,
