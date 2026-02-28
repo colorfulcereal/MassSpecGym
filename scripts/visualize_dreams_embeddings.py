@@ -271,11 +271,11 @@ def parse_args():
                         "If provided, a two-panel before/after plot is produced.")
     p.add_argument("--out", default="results/plots/umap_embeddings.png")
     p.add_argument("--method", choices=["umap", "tsne"], default="umap")
-    p.add_argument("--n_pfas", type=int, default=3000,
+    p.add_argument("--n_pfas", type=int, default=5000,
                    help="Total PFAS spectra to sample, drawn proportionally per subclass "
-                        "(default 3000, matching n_nonpfas for a balanced plot)")
-    p.add_argument("--n_nonpfas", type=int, default=3000,
-                   help="Number of non-PFAS spectra to sample (default 3000)")
+                        "(default 5000, matching n_nonpfas for a balanced plot)")
+    p.add_argument("--n_nonpfas", type=int, default=5000,
+                   help="Number of non-PFAS spectra to sample (default 5000)")
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--n_peaks", type=int, default=60)
     p.add_argument("--fold", choices=["train", "val", "all"], default="all",
