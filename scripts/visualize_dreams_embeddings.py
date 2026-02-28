@@ -275,8 +275,9 @@ def parse_args():
                    help="Number of non-PFAS spectra to sample (default 3000)")
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--n_peaks", type=int, default=60)
-    p.add_argument("--fold", choices=["train", "val", "all"], default="val",
-                   help="Which data fold to use. 'val' is faster and less biased.")
+    p.add_argument("--fold", choices=["train", "val", "all"], default="all",
+                   help="Which data fold to use. Defaults to 'all' because most PFAS "
+                        "subclasses exist only in the train fold.")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
