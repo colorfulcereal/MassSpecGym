@@ -72,14 +72,14 @@ def classify_pfas_subclass(smiles: str) -> str:
 # ── Plotting config ───────────────────────────────────────────────────────────
 
 LABEL_COLORS = {
-    NON_PFAS_LABEL:              "#aaaaaa",
-    "FT acrylate/methacrylate":  "#b5171e",
-    "Nitroaromatic PFAS":        "#c45c00",
-    "PFAS sulfonamide":          "#1a6b5e",
-    "Fluorotelomer phosphate":   "#1a4a6e",
-    "FT thioacrylate":           "#2e7a7a",
-    "PFAS betaine":              "#4a2070",
-    "Other PFAS":                "#9a7500",
+    NON_PFAS_LABEL:              "#cccccc",
+    "FT acrylate/methacrylate":  "#e63946",
+    "Nitroaromatic PFAS":        "#f4a261",
+    "PFAS sulfonamide":          "#2a9d8f",
+    "Fluorotelomer phosphate":   "#457b9d",
+    "FT thioacrylate":           "#a8dadc",
+    "PFAS betaine":              "#6a4c93",
+    "Other PFAS":                "#f1c40f",
 }
 LABEL_SIZES = {k: (4 if k == NON_PFAS_LABEL else 20) for k in LABEL_COLORS}
 LABEL_ALPHA = {k: (0.20 if k == NON_PFAS_LABEL else 0.88) for k in LABEL_COLORS}
@@ -246,7 +246,7 @@ def make_plot(
 
     _plot_single(axes[0], coords_pretrained, labels, "Pretrained DreaMS", method)
     if coords_finetuned is not None:
-        _plot_single(axes[1], coords_finetuned, labels, "Fine-tuned DreaMS", method)
+        _plot_single(axes[1], coords_finetuned, labels, "DreaMS-PFAS (Fine-Tuned DreaMS)", method)
 
     n_pfas = sum(1 for l in labels if l != NON_PFAS_LABEL)
     fig.suptitle(
