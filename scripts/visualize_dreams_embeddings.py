@@ -72,14 +72,14 @@ def classify_pfas_subclass(smiles: str) -> str:
 # ── Plotting config ───────────────────────────────────────────────────────────
 
 LABEL_COLORS = {
-    NON_PFAS_LABEL:              "#cccccc",
-    "FT acrylate/methacrylate":  "#e63946",
-    "Nitroaromatic PFAS":        "#f4a261",
-    "PFAS sulfonamide":          "#2a9d8f",
-    "Fluorotelomer phosphate":   "#457b9d",
-    "FT thioacrylate":           "#a8dadc",
-    "PFAS betaine":              "#6a4c93",
-    "Other PFAS":                "#f1c40f",
+    NON_PFAS_LABEL:              "#aaaaaa",
+    "FT acrylate/methacrylate":  "#b5171e",
+    "Nitroaromatic PFAS":        "#c45c00",
+    "PFAS sulfonamide":          "#1a6b5e",
+    "Fluorotelomer phosphate":   "#1a4a6e",
+    "FT thioacrylate":           "#2e7a7a",
+    "PFAS betaine":              "#4a2070",
+    "Other PFAS":                "#9a7500",
 }
 LABEL_SIZES = {k: (4 if k == NON_PFAS_LABEL else 20) for k in LABEL_COLORS}
 LABEL_ALPHA = {k: (0.20 if k == NON_PFAS_LABEL else 0.88) for k in LABEL_COLORS}
