@@ -323,6 +323,13 @@ if DEBUG:
 else:
     batch_size = 64
 
+# Class weights — inverse frequency, computed from training fold (n=594,388)
+# Isolated CF2/CF3  (idx 0):  25,895 samples  (4.4%)
+# PFAS chain        (idx 1):  19,194 samples  (3.2%)
+# Other fluorine    (idx 2):  47,152 samples  (7.9%)
+# Non-fluorinated   (idx 3): 502,147 samples  (84.5%)
+class_weights = torch.tensor([3.0, 4.0, 1.75, 0.30], dtype=torch.float32) 
+
 for i in range(0, num_iterations):
     # Load dataset with the new multi-class transform
     dataset = TestMassSpecDataset(
@@ -345,6 +352,7 @@ for i in range(0, num_iterations):
     model = FluorineDetectorDreamsTest(
         num_classes=NUM_CLASSES,
         batch_size=batch_size,
+        class_weights=class_weights,
         lr=lr
     )
 

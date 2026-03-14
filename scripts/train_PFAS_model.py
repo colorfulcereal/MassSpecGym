@@ -117,7 +117,7 @@ torch.set_float32_matmul_precision('high')
 # Init hyperparameters
 max_epochs = 1
 n_peaks = 60
-threshold = 0.9
+threshold = 0.2
 # alpha = 1, gamma = 0 is BCELoss
 alpha = 1
 gamma = 0
@@ -134,7 +134,7 @@ for i in range(0, num_iterations):
     # Load dataset
     dataset = TestMassSpecDataset(
         spec_transform=SpecTokenizer(n_peaks=n_peaks),
-        mol_transform = MolToIsolatedCF2Vector(),
+        mol_transform = MolToPFASVector(),
         pth='/teamspace/studios/this_studio/files/merged_massspec_nist20_nist_new_with_fold.tsv'
     )
 

@@ -115,7 +115,7 @@ def scan_and_run_pfas(directory, output_csv="pfas_hits.csv", threshold=0.95):
                     all_hits.append(df_hits)
 
             except Exception as e:
-                print(f"❌ Error processing {fname}: {e}")
+                print(f"Error processing {fname}: {e}")
 
     BOLD = '\033[1m'
     END = '\033[0m'
@@ -129,7 +129,7 @@ def scan_and_run_pfas(directory, output_csv="pfas_hits.csv", threshold=0.95):
         print(f"Output saved to: {output_csv}")
         return final_df
     else:
-        print("\n🚫 No PFAS candidates found in any file.")
+        print("\n No PFAS candidates found in any file.")
         return pd.DataFrame()  # empty
 
 
