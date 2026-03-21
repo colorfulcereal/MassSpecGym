@@ -1,11 +1,14 @@
 #  python MassSpecGym/scripts/detect_PFAS.py
 
+from pathlib import Path
 from massspecgym.models.pfas import HalogenDetectorDreamsTest
-ckpt_path = '/teamspace/studios/this_studio/HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS/ujmvyfxm/checkpoints/epoch=0-step=9285.ckpt'
+
+_LOCAL_CKPT = Path.home() / "Downloads" / "HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS_ujmvyfxm_checkpoints_epoch=0-step=9285.ckpt"
+_REMOTE_CKPT = '/teamspace/studios/this_studio/HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS/ujmvyfxm/checkpoints/epoch=0-step=9285.ckpt'
+
+ckpt_path = str(_LOCAL_CKPT) if _LOCAL_CKPT.exists() else _REMOTE_CKPT
 model = HalogenDetectorDreamsTest.load_from_checkpoint(ckpt_path)
 print(model)
-
-from pathlib import Path
 from tqdm import tqdm
 from dreams.utils.data import MSData
 from dreams.api import dreams_predictions, PreTrainedModel
