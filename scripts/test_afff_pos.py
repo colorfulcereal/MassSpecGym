@@ -22,9 +22,9 @@ from dreams.utils.io import append_to_stem
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-AFFF_DIR       = Path("~/Downloads/afff").expanduser()
-POS_DIR        = AFFF_DIR / "pos"
-FEATURE_LIST   = AFFF_DIR / "feature_list.csv"
+AFFF_DIR       = '/teamspace/studios/this_studio/MassSpecGym/afff/'
+POS_DIR        = Path(AFFF_DIR) / 'pos'
+FEATURE_LIST   = Path(AFFF_DIR) / 'feature_list.csv'
 OUTPUT_CSV     = Path("afff_pos_results.csv")
 MZ_TOLERANCE   = 0.02   # Da — appropriate for high-res qTOF
 N_PEAKS        = 60
@@ -66,6 +66,7 @@ def match_feature(prec_mz, feature_mzs, tol=MZ_TOLERANCE):
 # ---------------------------------------------------------------------------
 all_rows = []
 
+POS_DIR = Path(POS_DIR)
 mzml_files = sorted(POS_DIR.glob("*.mzML")) + sorted(POS_DIR.glob("*.mzml"))
 if not mzml_files:
     raise FileNotFoundError(f"No .mzML files found in {POS_DIR}")
