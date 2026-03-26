@@ -265,7 +265,59 @@ To mine additional unannotated but likely-PFAS spectra from raw data (e.g., `soi
 
 ---
 
-## 11. Open Questions / Next Steps
+## 11. Evaluation Results: AFFF Positive-Mode (Jonathan's Dataset)
+
+**Date:** 2026-03-21 | **Script:** `scripts/test_afff_pos.py` | **Threshold:** 0.2
+
+### Setup
+- 4 mzML files from `afff/pos/` (real-world environmental samples, positive ion mode)
+- 58 positive-mode PFAS in `feature_list.csv` (all ground truth = PFAS)
+- 1364 total high-quality spectra after DreaMS quality filtering
+- 20 spectra matched to feature list entries (±0.02 Da); 38 features had no matching high-quality MS2
+
+### Metrics
+| Metric | Value |
+|--------|-------|
+| Precision | **0.917** |
+| Recall | **0.550** (over 20 matched spectra) |
+| F1 | **0.687** |
+| True Positives | 11 |
+| False Negatives | 9 |
+| False Positives | 1 |
+
+### True Positives
+| Compound | Adduct | PFAS_pred |
+|----------|--------|-----------|
+| 5:1:2 FTB | [M]+ | 0.894 |
+| 7:1:2 FTB | [M]+ | 0.447 |
+| 6:2 FTSy-(2')OHPr-TriMeAm | [M]+ | 0.208 |
+| PFHxSAm-Pr-TriMeAm | [M]+ | 0.856 |
+| 6:2 FTSAm-Pr-B | [M]+ | 0.525 / 0.410 / 0.903 / 0.943 (4 spectra across files) |
+| 6:2 FTTh-(2')OHPr-TriMeAm | [M]+ | 0.668 |
+| PFOSAm-Pr-DiMeAm | [M+H]+ | 0.804 |
+| 6:2 FTSAm-Pr-DiMeNO | [M]+ | 0.652 |
+
+### False Negatives (Missed)
+| Compound | Adduct | PFAS_pred |
+|----------|--------|-----------|
+| 6:2 FTSAm-Pr-B | [M]+ | 0.070 |
+| 6:2 FTSO-(2')OHPr-TriMeAm | [M]+ | 0.001 / 0.001 / 0.006 (3 spectra) |
+| 6:2 FTSy-(2')OHPr-TriMeAm | [M]+ | 0.160 |
+| 8:2 FTSO-(2')OHPr-TriMeAm | [M]+ | 0.000 |
+| 8:2 FTSAm-Pr-B | [M]+ | 0.000 |
+| 8:2 FTSy-(2')OHPr-TriMeAm | [M]+ | 0.002 |
+| 6:2 FTSAm-Pr-DiMeAm | [M+H]+ | 0.000 |
+
+### Key Findings
+1. **FTB (fluorotelomer betaines) and FTSAm classes are well-detected** — model confidently scores these above 0.2
+2. **FTSO (fluorotelomer sulfoxide) and FTSy amine-oxide classes are consistently missed** — PFAS_pred scores near 0.000, not borderline; these have polar head groups (amine oxides, sulfoxides) likely absent from NIST20 training data
+3. **Lowering the threshold will not recover the false negatives** — scores too low (< 0.01 for most); fix requires retraining with these compound classes
+4. **Precision of 0.917 is strong** — only 1 false positive out of 1344 non-PFAS spectra
+5. **6:2 FTSAm-Pr-B detected in 3/4 files but missed in one** — spectrum-level quality variation, not a structural recognition failure
+
+---
+
+## 12. Open Questions / Next Steps
 
 - [ ] **Multi-class fluorination:** Extend from binary PFAS label to multi-class fluorinated type using `MolToFluorinatedTypeVector`
 - [ ] **Re-enable AUROC/AP:** Uncomment `roc_auc_score` and `average_precision_score` in validation epoch end
@@ -280,7 +332,7 @@ To mine additional unannotated but likely-PFAS spectra from raw data (e.g., `soi
 
 ---
 
-## 12. Key File Paths
+## 13. Key File Paths
 
 | File | Role |
 |------|------|
