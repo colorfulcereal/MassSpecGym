@@ -30,10 +30,14 @@ from massspecgym.data.transforms import MolToHalogensVector, MolToPFASVector, Mo
 import numpy as np
 from pytorch_lightning.loggers import WandbLogger
 from sklearn.metrics import roc_auc_score, average_precision_score
+import pytorch_lightning as pl
+import time
 
 numpy.set_printoptions(threshold=sys.maxsize)
 
-pl.seed_everything(0)
+seed = int(time.time())
+pl.seed_everything(seed)
+#pl.seed_everything(0)
 
 DEBUG = False
 
@@ -118,12 +122,11 @@ torch.set_float32_matmul_precision('high')
 max_epochs = 1
 n_peaks = 60
 threshold = 0.2
-# alpha = 1, gamma = 0 is BCELoss
-alpha = 1
-gamma = 0
+alpha = 0.25
+gamma = 0.75
 lr = 1e-5 # found 1e-5 as best
 num_iterations = 1
-loss='bce'
+loss='focal'
 
 if DEBUG:
     batch_size = 1

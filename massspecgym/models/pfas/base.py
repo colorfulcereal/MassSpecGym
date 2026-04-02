@@ -10,7 +10,7 @@ from massspecgym.data import MassSpecDataset, MassSpecDataModule
 from massspecgym.data.transforms import SpecTokenizer, MolFingerprinter
 from massspecgym.models.base import Stage
 from massspecgym.models.retrieval.base import MassSpecGymModel
-from sklearn.metrics import precision_score, recall_score, accuracy_score
+from sklearn.metrics import precision_score, recall_score, accuracy_score, confusion_matrix
 from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.utilities import grad_norm
@@ -27,9 +27,11 @@ from massspecgym.data.transforms import MolToHalogensVector, MolToPFASVector
 import numpy as np
 from pytorch_lightning.loggers import WandbLogger
 from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.calibration import calibration_curve
+import matplotlib.pyplot as plt
 
 numpy.set_printoptions(threshold=sys.maxsize)
-n_examples_to_sample = 100
+n_examples_to_sample = 2000
 
 class HalogenDetectorDreamsTest(MassSpecGymModel):
     def __init__(
@@ -83,8 +85,10 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
 
         # New classification head for PFAS detection
         self.lin_out = nn.Linear(1024, 1) # for F
+        # Reinitialize the output layer with a fresh random seed
+        nn.init.xavier_uniform_(self.lin_out.weight)
+        nn.init.zeros_(self.lin_out.bias)
 
-    
     def forward(self, x):
         output_main_model = self.main_model(x)[:, 0, :]  # [B,1024]
         logits = self.lin_out(output_main_model).squeeze(1)  # [B]
@@ -96,18 +100,19 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         if self.loss == "bce":
             return self._step_bce_loss(batch, stage)
         else:
-            raise ValueError("Only BCELoss supported now")
-            #return self._step_focal_loss(batch, stage)
+            #raise ValueError("Only BCELoss supported now")
+            # print ("Focal Loss...")
+            return self._step_focal_loss(batch, stage)
 
     def _step_bce_loss(self, batch: dict, stage: Stage) -> dict:
         # Unpack inputs
         x = batch["spec"]                 # [B, n_peaks+1, 2]
         y_vec = batch["mol"][:, 0]        # [B] PFAS label (should be 0/1)
 
-        # ✅ Force clean binary targets (prevents gather/index issues)
+        # Force clean binary targets (prevents gather/index issues)
         targets = (y_vec > 0.5).float()   # [B] in {0.0, 1.0}
 
-        # ✅ Forward should return logits (so update forward() accordingly)
+        # Forward should return logits (so update forward() accordingly)
         logits = self.forward(x)          # [B] logits (NOT probabilities)
 
         # --- hard negative weighting (keep your idea) ---
@@ -121,7 +126,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             weights
         )
 
-        # ✅ Stable loss for rare positives
+        # Stable loss for rare positives
         per_sample = F.binary_cross_entropy_with_logits(
             logits,
             targets,
@@ -138,45 +143,54 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         return {"loss": loss}
     
     def _step_focal_loss(self, batch: dict, stage: Stage) -> dict:
-        print("here...Focal")
         """Implement your custom logic of using predictions for training and inference."""
         # Unpack inputs
         x = batch["spec"]  # shape: [batch_size, num_peaks + 1, 2]
-
-        halogen_vector_true = batch["mol"] # shape: [batch_size, 4]
+        halogen_vector_true = batch["mol"]  # shape: [batch_size, 4]
 
         logits = self.forward(x)  # [B] logits
+        probs = torch.sigmoid(logits)  # [B] probabilities in (0, 1)
+
+        # NaN/Inf guard
+        if torch.isnan(probs).any() or torch.isinf(probs).any():
+            print(f"[WARNING] NaN/Inf in probs at stage={stage}, skipping batch")
+            return {"loss": torch.tensor(0.0, device=probs.device, requires_grad=True)}
 
         # True PFAS labels from vector
         true_values = halogen_vector_true[:, 0]
 
-        # SAFETY: force labels to be clean 0/1 longs (prevents gather crash)
-        # If your PFAS vector is already 0/1, this is harmless.
-        targets = (true_values > 0.5).long()          # [B] in {0,1}
-        targets_f = targets.float()                   # [B] float for BCE
+        # Force labels to clean 0/1 longs
+        targets = (true_values > 0.5).long()   # [B] in {0, 1}
+        targets_f = targets.float()            # [B] float for BCE
 
         # Hard negatives weighting
         F_present = batch["F"].float()
         hard_negatives = (F_present == 1) & (targets == 0)
         weights = torch.ones_like(targets_f)
-        weights = torch.where(hard_negatives, torch.tensor(float(self.hard_neg_weight), device=weights.device), weights)
+        weights = torch.where(
+            hard_negatives,
+            torch.tensor(float(self.hard_neg_weight), device=weights.device),
+            weights,
+        )
 
-        # ---- Stable focal loss on logits ----
-        bce = F.binary_cross_entropy_with_logits(logits, targets_f, reduction="none")  # [B]
-        pt = torch.exp(-bce)  # [B]
+        # ---- Focal loss on probabilities ----
+        # Clamp probs away from 0 and 1 for numerical stability
+        probs = probs.clamp(min=1e-6, max=1.0 - 1e-6)
 
-        # alpha per-sample: alpha for class1, (1-alpha) for class0
+        # BCE from probabilities manually
+        bce = -(targets_f * torch.log(probs) + (1.0 - targets_f) * torch.log(1.0 - probs))  # [B]
+
+        # pt: probability of the true class
+        pt = probs * targets_f + (1.0 - probs) * (1.0 - targets_f)  # [B]
+        focal_weight = (1.0 - pt).clamp(min=0.0).pow(self.gamma)    # [B]
+
+        # alpha per-sample: alpha for class 1, (1 - alpha) for class 0
         alpha_t = self.alpha_vec[1] * targets_f + self.alpha_vec[0] * (1.0 - targets_f)
 
-        loss = alpha_t * (1 - pt).pow(self.gamma) * bce
+        loss = alpha_t * focal_weight * bce
         loss = (loss * weights).mean()
 
-        # Debug stats (optional)
-        # probs = torch.sigmoid(logits)
-        # print("p(min/mean/max)=", probs.min().item(), probs.mean().item(), probs.max().item())
-
         return {"loss": loss}
-
 
     def on_batch_end(self, outputs: dict, batch: dict, batch_idx: int, stage: Stage) -> None:
         x = batch["spec"]
@@ -185,7 +199,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         # forward now returns logits: [B]
         logits = self.forward(x)
 
-        # ✅ convert logits -> probabilities: [B]
+        # convert logits -> probabilities: [B]
         pred_probs = torch.sigmoid(logits)
 
         # thresholding (keep as is)
@@ -333,19 +347,19 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         df_p = df_preds[(df_preds["true_label"] == 1)]
         df_p["pred_prob"].to_csv(pred_prob_filename, index=False)
 
-        print(f"✅ True Positive identifiers written to {tp_filename}")
-        print(f"✅ False Negative identifiers wth probability < 0.2 written to {fn_filename}")
-        print(f"✅ Predicted Probabilities Positives written to {pred_prob_filename}")
+        print(f"True Positive identifiers written to {tp_filename}")
+        print(f"False Negative identifiers wth probability < 0.2 written to {fn_filename}")
+        print(f"Predicted Probabilities Positives written to {pred_prob_filename}")
 
         self.save_precision_recall_table()
+        self.save_calibration_curve()
 
 
     def save_precision_recall_table(self) -> None:
-    # --- after you already have self.all_true_labels / self.all_predicted_probs ---
         y_true = np.array(self.all_true_labels)
         y_prob = np.array(self.all_predicted_probs)
 
-        thresholds = np.arange(0.0, 1.01, 0.1)   # 0.00 → 1.00 in steps of 0.1
+        thresholds = np.arange(0.0, 1.01, 0.1)
         rows = []
 
         for t in thresholds:
@@ -353,17 +367,75 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             precision = precision_score(y_true, y_pred, zero_division="warn")
             recall    = recall_score(y_true, y_pred, zero_division="warn")
             accuracy  = accuracy_score(y_true, y_pred)
-            # Compute F1 (safe even if precision+recall = 0)
             f1 = (
                 2 * precision * recall / (precision + recall)
                 if (precision + recall) > 0
                 else 0
             )
-            rows.append((t, precision, recall, accuracy, f1))
 
-        # Convert to dataframe for cleaner printing
-        df_thresh = pd.DataFrame(rows, columns=["threshold", "precision", "recall", "accuracy", "f1"])
+            # Derive TPR and FPR from confusion matrix
+            tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+            tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0   # same as recall
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
 
-        print("\n=== Precision / Recall / Accuracy / F1 by Threshold ===")
+            rows.append((t, precision, recall, accuracy, f1, tpr, fpr))
+
+        df_thresh = pd.DataFrame(
+            rows,
+            columns=["threshold", "precision", "recall", "accuracy", "f1", "tpr", "fpr"]
+        )
+
+        print("\n=== Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ===")
         print(df_thresh.to_string(index=False))
         df_thresh.to_csv("pr_table.csv", index=False)
+
+
+    def save_calibration_curve(self) -> None:
+        y_true = np.array(self.all_true_labels)
+        y_prob = np.array(self.all_predicted_probs)
+
+        fraction_of_positives, mean_predicted_prob = calibration_curve(
+            y_true, y_prob, n_bins=10, strategy='uniform'
+        )
+
+        # --- Save calibration curve data ---
+        df_calibration = pd.DataFrame({
+            'mean_predicted_prob': mean_predicted_prob,
+            'fraction_of_positives': fraction_of_positives
+        })
+        df_calibration.to_csv('calibration_curve.csv', index=False)
+
+        # --- Save score distribution data ---
+        df_scores = pd.DataFrame({
+            'predicted_prob': y_prob,
+            'true_label': y_true,
+            'class': ['PFAS' if t == 1 else 'Non-PFAS' for t in y_true]
+        })
+        df_scores.to_csv('score_distribution.csv', index=False)
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        # --- Left: Calibration curve ---
+        ax1 = axes[0]
+        ax1.plot(mean_predicted_prob, fraction_of_positives,
+                marker='o', color='steelblue', lw=2, label='DreaMS-PFAS')
+        ax1.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Perfectly calibrated')
+        ax1.set_xlabel('Mean Predicted Probability')
+        ax1.set_ylabel('Fraction of Positives')
+        ax1.set_title('Calibration Curve')
+        ax1.legend(loc='upper left')
+
+        # --- Right: Confidence histogram ---
+        ax2 = axes[1]
+        ax2.hist(y_prob[y_true == 0], bins=20, alpha=0.6, color='steelblue', label='Non-PFAS')
+        ax2.hist(y_prob[y_true == 1], bins=20, alpha=0.6, color='tomato',    label='PFAS')
+        ax2.set_xlabel('Predicted Probability')
+        ax2.set_ylabel('Count')
+        ax2.set_title('Score Distribution')
+        ax2.legend()
+
+        plt.tight_layout()
+        plt.savefig('calibration_curve.png', dpi=300)
+        plt.show()
+
+        print("Saved: calibration_curve.csv, score_distribution.csv")

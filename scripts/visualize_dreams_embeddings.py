@@ -250,6 +250,7 @@ def make_plot(
         f"DreaMS Embeddings — {method.upper()}  |  "
         f"PFAS: {n_pfas:,}  |  Non-PFAS: {n_nonpfas:,}",
         fontsize=14, y=1.01,
+        fontweight="bold"
     )
     plt.tight_layout()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
