@@ -71,21 +71,17 @@ def classify_pfas_subclass(smiles: str) -> str:
 
 # ── Plotting config ───────────────────────────────────────────────────────────
 
+PFAS_LABEL = "PFAS"
+
 LABEL_COLORS = {
-    NON_PFAS_LABEL:              "#cccccc",
-    "FT acrylate/methacrylate":  "#e63946",
-    "Nitroaromatic PFAS":        "#f4a261",
-    "PFAS sulfonamide":          "#2a9d8f",
-    "Fluorotelomer phosphate":   "#457b9d",
-    "FT thioacrylate":           "#a8dadc",
-    "PFAS betaine":              "#6a4c93",
-    "Other PFAS":                "#f1c40f",
+    NON_PFAS_LABEL: "#4C8DC4",   # steel blue
+    PFAS_LABEL:     "#C0392B",   # brick red
 }
-LABEL_SIZES = {k: (4 if k == NON_PFAS_LABEL else 20) for k in LABEL_COLORS}
-LABEL_ALPHA = {k: (0.20 if k == NON_PFAS_LABEL else 0.88) for k in LABEL_COLORS}
+LABEL_SIZES = {NON_PFAS_LABEL: 4,  PFAS_LABEL: 20}
+LABEL_ALPHA = {NON_PFAS_LABEL: 0.20, PFAS_LABEL: 0.88}
 
 # Non-PFAS drawn first so PFAS points sit on top
-LABEL_ORDER = [NON_PFAS_LABEL] + [k for k in LABEL_COLORS if k != NON_PFAS_LABEL]
+LABEL_ORDER = [NON_PFAS_LABEL, PFAS_LABEL]
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -248,10 +244,11 @@ def make_plot(
     if coords_finetuned is not None:
         _plot_single(axes[1], coords_finetuned, labels, "DreaMS-PFAS (Fine-Tuned DreaMS)", method)
 
-    n_pfas = sum(1 for l in labels if l != NON_PFAS_LABEL)
+    n_pfas = sum(1 for l in labels if l == PFAS_LABEL)
+    n_nonpfas = sum(1 for l in labels if l == NON_PFAS_LABEL)
     fig.suptitle(
         f"DreaMS Embeddings — {method.upper()}  |  "
-        f"n={len(labels):,}  ({n_pfas:,} PFAS by chemical subclass)",
+        f"PFAS: {n_pfas:,}  |  Non-PFAS: {n_nonpfas:,}",
         fontsize=14, y=1.01,
     )
     plt.tight_layout()
@@ -306,27 +303,16 @@ def main():
     if args.fold != "all":
         df = df[df["fold"] == args.fold]
 
-    # ── Label all PFAS rows first (needed for proportional sampling) ──────────
+    # ── Sample PFAS and Non-PFAS ──────────────────────────────────────────────
     pfas_all = df[df["is_PFAS"]].copy()
-    pfas_all["subclass"] = pfas_all["smiles"].apply(classify_pfas_subclass)
-
-    # Sample PFAS proportionally per subclass so rare subclasses aren't
-    # swamped by the dominant FT acrylate/methacrylate group
-    subclass_counts = pfas_all["subclass"].value_counts()
-    total_pfas = len(pfas_all)
-    pfas_parts = []
-    for subclass, count in subclass_counts.items():
-        n_take = max(1, round(args.n_pfas * count / total_pfas))
-        n_take = min(n_take, count)
-        pfas_parts.append(
-            pfas_all[pfas_all["subclass"] == subclass].sample(n=n_take, random_state=args.seed)
-        )
-    pfas_df = pd.concat(pfas_parts, ignore_index=True)
+    pfas_df = pfas_all.sample(
+        n=min(args.n_pfas, len(pfas_all)), random_state=args.seed
+    ).copy()
+    pfas_df["subclass"] = PFAS_LABEL
 
     nonpfas_df = df[~df["is_PFAS"]].sample(
         n=min(args.n_nonpfas, (~df["is_PFAS"]).sum()), random_state=args.seed
-    )
-    nonpfas_df = nonpfas_df.copy()
+    ).copy()
     nonpfas_df["subclass"] = NON_PFAS_LABEL
 
     sample_df = pd.concat([pfas_df, nonpfas_df], ignore_index=True)
