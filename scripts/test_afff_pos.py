@@ -1,35 +1,26 @@
 # python scripts/test_afff_pos.py
 #
-# Evaluates DreaMS-PFAS on Jonathan's AFFF positive-mode data.
-# All compounds in the feature_list.csv are true PFAS (ground truth = 1).
-# Runs the model on ALL high-quality spectra in afff/pos/ mzML files, labels
-# each spectrum as PFAS if its precursor m/z matches a feature list entry
-# within MZ_TOLERANCE, then reports precision and recall.
+# Evaluates DreaMS-PFAS on the pre-processed AFFF positive-mode test set TSV.
+# All 162 spectra are true PFAS (is_PFAS=1). Primary metric: Recall at threshold=0.2.
 
 from pathlib import Path
-import os
 import numpy as np
 import pandas as pd
+import matchms
 import torch
-from sklearn.metrics import precision_score, recall_score, classification_report
+from sklearn.metrics import recall_score, classification_report
 
+from massspecgym.data.transforms import SpecTokenizer
 from massspecgym.models.pfas import HalogenDetectorDreamsTest
-from dreams.utils.data import MSData
 from dreams.api import dreams_predictions
-from dreams.utils.dformats import DataFormatA
-from dreams.utils.io import append_to_stem
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-AFFF_DIR       = '/teamspace/studios/this_studio/MassSpecGym/afff/'
-POS_DIR        = Path(AFFF_DIR) / 'pos'
-FEATURE_LIST   = Path(AFFF_DIR) / 'feature_list.csv'
-OUTPUT_CSV     = Path("afff_pos_results.csv")
-MZ_TOLERANCE   = 0.02   # Da — appropriate for high-res qTOF
-N_PEAKS        = 60
-THRESHOLD      = 0.2
-POLARITY_KEY   = "pos"  # string to match in the polarity column
+INPUT_TSV  = Path.home() / "Downloads" / "afff_pos_matched_spectra_test_set.tsv"
+OUTPUT_CSV = Path("afff_pos_tsv_results.csv")
+N_PEAKS    = 60
+THRESHOLD  = 0.2
 
 _LOCAL_CKPT  = Path.home() / "Downloads" / "HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS_ujmvyfxm_checkpoints_epoch=0-step=9285.ckpt"
 _REMOTE_CKPT = "/teamspace/studios/this_studio/HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS/ujmvyfxm/checkpoints/epoch=0-step=9285.ckpt"
@@ -43,130 +34,79 @@ model = HalogenDetectorDreamsTest.load_from_checkpoint(ckpt_path)
 model.eval()
 
 # ---------------------------------------------------------------------------
-# Load feature list — all entries are PFAS; keep positive-mode rows
+# Load TSV
 # ---------------------------------------------------------------------------
-features = pd.read_csv(FEATURE_LIST)
-print(f"Feature list columns: {features.columns.tolist()}")
-print(f"Feature list polarity values: {features['polarity'].unique()}")
-
-pos_features = features[features["polarity"].str.lower().str.contains(POLARITY_KEY)].copy()
-pos_mzs = pos_features["mz"].values  # array of known PFAS precursor m/z values
-print(f"\nPositive-mode PFAS features: {len(pos_features)}")
-
-def match_feature(prec_mz, feature_mzs, tol=MZ_TOLERANCE):
-    """Return the closest matching feature index and m/z error, or None if no match."""
-    diffs = np.abs(feature_mzs - prec_mz)
-    idx = np.argmin(diffs)
-    if diffs[idx] <= tol:
-        return idx, diffs[idx]
-    return None, None
+print(f"\nLoading TSV: {INPUT_TSV}")
+df = pd.read_csv(INPUT_TSV, sep="\t")
+print(f"Loaded {len(df)} spectra  (is_PFAS=1: {df['is_PFAS'].sum()})")
 
 # ---------------------------------------------------------------------------
-# Process each mzML in afff/pos/
+# Build spectrum list for dreams_predictions
 # ---------------------------------------------------------------------------
-all_rows = []
+tokenizer = SpecTokenizer(n_peaks=N_PEAKS)
+tokens = []
 
-POS_DIR = Path(POS_DIR)
-mzml_files = sorted(POS_DIR.glob("*.mzML")) + sorted(POS_DIR.glob("*.mzml"))
-if not mzml_files:
-    raise FileNotFoundError(f"No .mzML files found in {POS_DIR}")
-
-print(f"\nFound {len(mzml_files)} mzML file(s) in {POS_DIR}\n")
-
-for mzml_pth in mzml_files:
-    print(f"Processing: {mzml_pth.name}")
-
+for _, row in df.iterrows():
+    mzs  = np.array([float(x) for x in str(row["mzs"]).split(",")])
+    ints = np.array([float(x) for x in str(row["intensities"]).split(",")])
+    spec = matchms.Spectrum(
+        mz=mzs,
+        intensities=ints,
+        metadata={"precursor_mz": float(row["precursor_mz"])},
+    )
     try:
-        msdata = MSData.from_mzml(mzml_pth, verbose_parser=True)
-    except ValueError as e:
-        print(f"  Skipping: {e}")
-        continue
+        tok = tokenizer(spec)
+    except Exception:
+        tok = torch.zeros(N_PEAKS + 1, 2)
+    tokens.append(tok.float())
 
-    spectra  = msdata["spectrum"]
-    prec_mzs = msdata["precursor_mz"]
+tokens_tensor = torch.stack(tokens)   # [N, n_peaks+1, 2]
 
-    # Quality filter
-    dformat = DataFormatA()
-    quality_lvls = [dformat.val_spec(s, p, return_problems=True) for s, p in zip(spectra, prec_mzs)]
-    hq_idx = np.where(np.array(quality_lvls) == "All checks passed")[0]
-    print(f"  {len(hq_idx)}/{len(spectra)} spectra passed quality filter")
+# ---------------------------------------------------------------------------
+# Run model
+# ---------------------------------------------------------------------------
+print("Running DreaMS-PFAS predictions...")
+device = (
+    torch.device("cuda") if torch.cuda.is_available()
+    else torch.device("mps") if torch.backends.mps.is_available()
+    else torch.device("cpu")
+)
+print(f"Using device: {device}")
 
-    if len(hq_idx) == 0:
-        print("  No high-quality spectra — skipping file.")
-        continue
+model = model.to(device)
+batch_size = 128
+all_probs = []
 
-    hq_pth = append_to_stem(mzml_pth, "high_quality").with_suffix(".hdf5")
-    msdata.form_subset(idx=hq_idx, out_pth=hq_pth)
-    msdata_hq = MSData.load(hq_pth)
+with torch.no_grad():
+    for i in range(0, len(tokens_tensor), batch_size):
+        batch = tokens_tensor[i : i + batch_size].to(device)
+        logits = model(batch)
+        probs  = torch.sigmoid(logits).cpu().numpy().flatten()
+        all_probs.extend(probs.tolist())
 
-    df_hq = msdata_hq.to_pandas()
-    hq_prec_mzs = df_hq["precursor_mz"].values
-
-    # Run model on all high-quality spectra
-    raw_preds = dreams_predictions(spectra=msdata_hq, model_ckpt=model, n_highest_peaks=N_PEAKS)
-    probs = torch.sigmoid(torch.from_numpy(raw_preds)).cpu().numpy()
-
-    # Label each spectrum: 1 if precursor m/z matches a feature list entry
-    for i, (prec_mz, prob) in enumerate(zip(hq_prec_mzs, probs)):
-        feat_idx, mz_err = match_feature(prec_mz, pos_mzs)
-        is_pfas = 1 if feat_idx is not None else 0
-
-        row = {
-            "file":                 mzml_pth.name,
-            "spectrum_precursor_mz": prec_mz,
-            "true_label":           is_pfas,
-            "PFAS_pred":            float(prob),
-            "predicted_PFAS":       int(prob >= THRESHOLD),
-        }
-        if feat_idx is not None:
-            row["compound_name"] = pos_features.iloc[feat_idx]["name"]
-            row["formula"]       = pos_features.iloc[feat_idx].get("formula", "")
-            row["adduct"]        = pos_features.iloc[feat_idx].get("adduct", "")
-            row["feature_mz"]    = pos_mzs[feat_idx]
-            row["mz_error_da"]   = float(mz_err)
-        else:
-            row["compound_name"] = ""
-            row["formula"]       = ""
-            row["adduct"]        = ""
-            row["feature_mz"]    = np.nan
-            row["mz_error_da"]   = np.nan
-
-        all_rows.append(row)
+probs_arr = np.array(all_probs)
 
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
-if not all_rows:
-    print("\nNo spectra processed. Check that mzML files are present and readable.")
-else:
-    results = pd.DataFrame(all_rows)
-    results.to_csv(OUTPUT_CSV, index=False)
+y_true = df["is_PFAS"].values.astype(int)
+y_pred = (probs_arr >= THRESHOLD).astype(int)
 
-    y_true = results["true_label"].values
-    y_pred = results["predicted_PFAS"].values
+results = df[["identifier", "precursor_mz", "adduct", "SMILES"]].copy()
+results["PFAS_prob"]      = probs_arr
+results["predicted_PFAS"] = y_pred
+results["true_label"]     = y_true
+results.to_csv(OUTPUT_CSV, index=False)
 
-    n_total    = len(results)
-    n_pfas     = int(y_true.sum())
-    n_non_pfas = n_total - n_pfas
+n_total   = len(results)
+n_flagged = int(y_pred.sum())
+recall    = recall_score(y_true, y_pred, zero_division=0)
 
-    print(f"\n{'='*55}")
-    print(f"  Total high-quality spectra processed : {n_total}")
-    print(f"  Matched to feature list (true PFAS)  : {n_pfas}")
-    print(f"  Unmatched (assumed non-PFAS)          : {n_non_pfas}")
-    print(f"{'='*55}")
-
-    if n_pfas == 0:
-        print("\nWARNING: No spectra matched the feature list within the m/z tolerance.")
-        print("Consider increasing MZ_TOLERANCE or checking the polarity filter.")
-    else:
-        precision = precision_score(y_true, y_pred, zero_division=0)
-        recall    = recall_score(y_true, y_pred, zero_division=0)
-        f1        = (2 * precision * recall / (precision + recall)
-                     if (precision + recall) > 0 else 0.0)
-
-        print(f"\n  Threshold : {THRESHOLD}")
-        print(f"  Precision : {precision:.3f}")
-        print(f"  Recall    : {recall:.3f}")
-        print(f"  F1        : {f1:.3f}")
-        print(f"\n{classification_report(y_true, y_pred, target_names=['non-PFAS', 'PFAS'], zero_division=0)}")
-        print(f"Results saved to: {OUTPUT_CSV}")
+print(f"\n{'='*55}")
+print(f"  Total spectra          : {n_total}")
+print(f"  Flagged as PFAS        : {n_flagged}  ({100*n_flagged/n_total:.1f}%)")
+print(f"  Threshold              : {THRESHOLD}")
+print(f"  Recall                 : {recall:.3f}  ({recall*100:.1f}%)")
+print(f"{'='*55}")
+print(f"\n{classification_report(y_true, y_pred, target_names=['non-PFAS', 'PFAS'], zero_division=0)}")
+print(f"Results saved to: {OUTPUT_CSV}")
