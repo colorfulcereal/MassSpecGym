@@ -17,7 +17,9 @@ from dreams.api import dreams_predictions
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-INPUT_TSV  = Path.home() / "Downloads" / "afff_pos_matched_spectra_test_set.tsv"
+_LOCAL_TSV  = Path.home() / "Downloads" / "afff_pos_matched_spectra_test_set.tsv"
+_REMOTE_TSV = Path("/teamspace/studios/this_studio/MassSpecGym/afff/afff_pos_matched_spectra_test_set.tsv")
+INPUT_TSV   = _LOCAL_TSV if _LOCAL_TSV.exists() else _REMOTE_TSV
 OUTPUT_CSV = Path("afff_pos_tsv_results.csv")
 N_PEAKS    = 60
 THRESHOLD  = 0.2
