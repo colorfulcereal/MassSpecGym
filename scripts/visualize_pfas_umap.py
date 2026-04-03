@@ -74,9 +74,9 @@ def classify_pfas_subtype(smiles: str) -> str:
 LABEL_COLORS = {
     NON_PFAS_LABEL:       "#CCCCCC",   # light gray background
     "PFCAs":              "#C0392B",   # brick red
-    "PFSAs":              "#2166AC",   # steel blue
+    "PFSAs":              "#E67E22",   # orange
     "Fluorotelomers":     "#27AE60",   # green
-    "PFAS Sulfonamides":  "#E67E22",   # orange
+    "PFAS Sulfonamides":  "#2166AC",   # steel blue
     OTHER_PFAS_LABEL:     "#8E44AD",   # purple
 }
 
