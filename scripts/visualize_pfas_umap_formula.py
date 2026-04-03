@@ -187,18 +187,20 @@ def _plot_panel(ax, coords, labels, config, order, title):
               framealpha=0.9, edgecolor="#cccccc")
 
 
-def make_plot(coords, fluor_labels, out_path, n_pfas, n_nonpfas):
+def make_plot(coords_pre, coords_ft, fluor_labels, out_path, n_pfas, n_nonpfas):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(8, 7), dpi=150)
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7), dpi=150)
 
-    _plot_panel(ax, coords, fluor_labels, FLUOR_CONFIG, FLUOR_ORDER,
-                "PFAS Embeddings — Number of Fluorine Atoms")
+    _plot_panel(axes[0], coords_pre, fluor_labels, FLUOR_CONFIG, FLUOR_ORDER,
+                "Pretrained DreaMS")
+    _plot_panel(axes[1], coords_ft,  fluor_labels, FLUOR_CONFIG, FLUOR_ORDER,
+                "DreaMS-PFAS (Fine-Tuned)")
 
     fig.suptitle(
-        f"DreaMS-PFAS Embeddings (UMAP)  |  PFAS: {n_pfas:,}  |  Non-PFAS: {n_nonpfas:,}",
+        f"Fluorine Atom Segmentation — UMAP  |  PFAS: {n_pfas:,}  |  Non-PFAS: {n_nonpfas:,}",
         fontsize=14, fontweight="bold", y=1.01,
     )
     plt.tight_layout()
@@ -214,9 +216,9 @@ def parse_args():
     p.add_argument("--data", required=True,
                    help="Path to merged TSV with mzs/intensities/precursor_formula columns")
     p.add_argument("--embeddings", default=None,
-                   help="Pre-computed .npz from visualize_pfas_umap.py (skips model inference)")
-    p.add_argument("--finetuned_ckpt", default=None,
-                   help="Fine-tuned checkpoint. Used only if --embeddings not supplied.")
+                   help="Pre-computed .npz with 'coords_pretrained' and 'coords_finetuned' keys (skips inference)")
+    p.add_argument("--finetuned_ckpt", required=False, default=None,
+                   help="Fine-tuned checkpoint (.ckpt). Required if --embeddings not supplied.")
     p.add_argument("--out", default="results/plots/pfas_umap_formula.png")
     p.add_argument("--n_pfas",     type=int, default=5000)
     p.add_argument("--n_nonpfas",  type=int, default=5000)
@@ -275,37 +277,44 @@ def main():
     if args.embeddings:
         print(f"\nLoading pre-computed embeddings from {args.embeddings}")
         npz = np.load(args.embeddings, allow_pickle=True)
-        # Prefer finetuned if available, else pretrained
-        key = "coords_finetuned" if "coords_finetuned" in npz else "coords_pretrained"
-        coords = npz[key]
-        print(f"Using coords key: '{key}'  shape: {coords.shape}")
-        assert len(coords) == len(sample_df), (
-            f"Embedding rows ({len(coords)}) != sample rows ({len(sample_df)}). "
-            "Re-generate embeddings with the same --n_pfas / --n_nonpfas / --seed."
+        assert "coords_pretrained" in npz and "coords_finetuned" in npz, (
+            "NPZ must contain both 'coords_pretrained' and 'coords_finetuned' keys. "
+            "Re-run with --finetuned_ckpt to generate them."
+        )
+        coords_pre = npz["coords_pretrained"]
+        coords_ft  = npz["coords_finetuned"]
+        assert len(coords_pre) == len(sample_df), (
+            f"Embedding rows ({len(coords_pre)}) != sample rows ({len(sample_df)}). "
+            "Re-generate with the same --n_pfas / --n_nonpfas / --seed."
         )
     else:
+        assert args.finetuned_ckpt, "Provide --finetuned_ckpt (or --embeddings) to run."
         dataset = RawSpecDataset(sample_df, n_peaks=args.n_peaks)
 
-        if args.finetuned_ckpt:
-            print(f"\nLoading fine-tuned checkpoint: {args.finetuned_ckpt}")
-            backbone = load_finetuned_backbone(args.finetuned_ckpt)
-        else:
-            print("\nLoading pretrained backbone...")
-            backbone = load_pretrained_backbone()
+        print("\nLoading pretrained backbone...")
+        backbone_pre = load_pretrained_backbone()
+        print("Extracting pretrained embeddings...")
+        emb_pre = extract_embeddings(backbone_pre, dataset, args.batch_size, device)
 
-        print("Extracting embeddings...")
-        emb = extract_embeddings(backbone, dataset, args.batch_size, device)
+        print(f"\nLoading fine-tuned checkpoint: {args.finetuned_ckpt}")
+        backbone_ft = load_finetuned_backbone(args.finetuned_ckpt)
+        print("Extracting fine-tuned embeddings...")
+        emb_ft = extract_embeddings(backbone_ft, dataset, args.batch_size, device)
 
-        print("Running UMAP...")
-        coords = reduce_umap(emb)
+        print("\nRunning UMAP on pretrained embeddings...")
+        coords_pre = reduce_umap(emb_pre)
+        print("Running UMAP on fine-tuned embeddings...")
+        coords_ft = reduce_umap(emb_ft)
 
         emb_out = Path(args.out).with_suffix(".npz")
-        np.savez_compressed(emb_out, coords=coords,
+        np.savez_compressed(emb_out,
+                            coords_pretrained=coords_pre,
+                            coords_finetuned=coords_ft,
                             labels_fluor=np.array(fluor_labels))
         print(f"Saved embeddings to {emb_out}")
 
     # ── Plot ──────────────────────────────────────────────────────────────────
-    make_plot(coords, fluor_labels, args.out, n_pfas, n_nonpfas)
+    make_plot(coords_pre, coords_ft, fluor_labels, args.out, n_pfas, n_nonpfas)
 
 
 if __name__ == "__main__":
