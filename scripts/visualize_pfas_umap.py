@@ -288,7 +288,8 @@ def main():
     pfas_all = df[df["is_PFAS"]].copy()
     pfas_all["subtype"] = pfas_all["smiles"].apply(classify_pfas_subtype)
 
-    pfas_all = pfas_all[pfas_all["subtype"] != OTHER_PFAS_LABEL]
+    KEEP_SUBTYPES = {"PFCAs", "PFSAs", "Fluorotelomers", "PFAS Sulfonamides"}
+    pfas_all = pfas_all[pfas_all["subtype"].isin(KEEP_SUBTYPES)]
 
     counts = pfas_all["subtype"].value_counts()
     total  = len(pfas_all)
