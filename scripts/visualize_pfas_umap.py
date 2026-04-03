@@ -99,8 +99,7 @@ LABEL_ALPHA = {
 }
 
 # Non-PFAS drawn first (background), then PFAS subtypes on top
-LABEL_ORDER = [NON_PFAS_LABEL, "PFCAs", "PFSAs", "Fluorotelomers",
-               "PFAS Sulfonamides", OTHER_PFAS_LABEL]
+LABEL_ORDER = [NON_PFAS_LABEL, "PFCAs", "PFSAs", "Fluorotelomers", "PFAS Sulfonamides"]
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -288,6 +287,8 @@ def main():
     # Classify PFAS by high-level subtype, sample proportionally
     pfas_all = df[df["is_PFAS"]].copy()
     pfas_all["subtype"] = pfas_all["smiles"].apply(classify_pfas_subtype)
+
+    pfas_all = pfas_all[pfas_all["subtype"] != OTHER_PFAS_LABEL]
 
     counts = pfas_all["subtype"].value_counts()
     total  = len(pfas_all)
