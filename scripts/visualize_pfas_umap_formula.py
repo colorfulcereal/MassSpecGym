@@ -1,23 +1,20 @@
 """
-UMAP visualization of DreaMS embeddings colored by:
-  (a) Carbon chain length (C1-C4, C5-C7, C8-C10, C11+)
-  (b) Number of fluorine atoms (1-3, 4-7, 8-12, 13+)
-
-Both derived from the precursor_formula column — no SMARTS needed.
-Non-PFAS shown as a gray background in both panels.
+UMAP visualization of DreaMS embeddings colored by number of fluorine atoms
+(1–3, 4–7, 8–12, 13+), derived from precursor_formula — no SMARTS needed.
+Non-PFAS shown as a gray background.
 
 Usage:
     # From pre-computed embeddings (.npz from visualize_pfas_umap.py):
     python scripts/visualize_pfas_umap_formula.py \
         --data ~/Downloads/merged_massspec_nist20_nist_new_env_pfas_with_fold.tsv \
         --embeddings results/plots/pfas_umap.npz \
-        --out results/plots/pfas_umap_formula.png
+        --out results/plots/pfas_umap_fluorine.png
 
     # Recompute embeddings from scratch:
     python scripts/visualize_pfas_umap_formula.py \
         --data ~/Downloads/merged_massspec_nist20_nist_new_env_pfas_with_fold.tsv \
         --finetuned_ckpt ~/Downloads/HalogenDetection-...ckpt \
-        --out results/plots/pfas_umap_formula.png
+        --out results/plots/pfas_umap_fluorine.png
 """
 
 import argparse
@@ -49,19 +46,6 @@ def _count_element(formula: str, element: str) -> int:
     return int(n) if n else 1
 
 
-def chain_length_bin(formula: str) -> str:
-    n = _count_element(formula, "C")
-    if n == 0:
-        return "Unknown"
-    if n <= 4:
-        return "C1–C4"
-    if n <= 7:
-        return "C5–C7"
-    if n <= 10:
-        return "C8–C10"
-    return "C11+"
-
-
 def fluorine_bin(formula: str) -> str:
     n = _count_element(formula, "F")
     if n == 0:
@@ -80,16 +64,7 @@ def fluorine_bin(formula: str) -> str:
 NON_PFAS_LABEL = "Non-PFAS"
 NON_PFAS_STYLE = dict(color="#CCCCCC", size=3, alpha=0.15)
 
-# Chain length — warm sequential
-CHAIN_CONFIG = {
-    "C1–C4":  dict(color="#FEE08B", size=25, alpha=0.90),
-    "C5–C7":  dict(color="#FC8D59", size=25, alpha=0.90),
-    "C8–C10": dict(color="#D73027", size=25, alpha=0.90),
-    "C11+":   dict(color="#7B2D8B", size=25, alpha=0.90),
-}
-CHAIN_ORDER = [NON_PFAS_LABEL, "C1–C4", "C5–C7", "C8–C10", "C11+"]
-
-# Fluorine count — cool sequential
+# Fluorine count — cool sequential blue
 FLUOR_CONFIG = {
     "1–3 F":  dict(color="#C6DBEF", size=25, alpha=0.90),
     "4–7 F":  dict(color="#6BAED6", size=25, alpha=0.90),
@@ -212,16 +187,14 @@ def _plot_panel(ax, coords, labels, config, order, title):
               framealpha=0.9, edgecolor="#cccccc")
 
 
-def make_plot(coords, chain_labels, fluor_labels, out_path, n_pfas, n_nonpfas):
+def make_plot(coords, fluor_labels, out_path, n_pfas, n_nonpfas):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7), dpi=150)
+    fig, ax = plt.subplots(figsize=(8, 7), dpi=150)
 
-    _plot_panel(axes[0], coords, chain_labels, CHAIN_CONFIG, CHAIN_ORDER,
-                "PFAS Embeddings — Carbon Chain Length")
-    _plot_panel(axes[1], coords, fluor_labels, FLUOR_CONFIG, FLUOR_ORDER,
+    _plot_panel(ax, coords, fluor_labels, FLUOR_CONFIG, FLUOR_ORDER,
                 "PFAS Embeddings — Number of Fluorine Atoms")
 
     fig.suptitle(
@@ -288,20 +261,14 @@ def main():
     n_nonpfas = len(nonpfas_df)
     print(f"Sample: {n_pfas:,} PFAS + {n_nonpfas:,} Non-PFAS = {len(sample_df):,}")
 
-    # ── Build labels from formula ─────────────────────────────────────────────
-    is_pfas_mask = sample_df["is_PFAS"].values
-
-    chain_labels, fluor_labels = [], []
+    # ── Build fluorine labels from formula ───────────────────────────────────
+    fluor_labels = []
     for _, row in sample_df.iterrows():
         if not row["is_PFAS"]:
-            chain_labels.append(NON_PFAS_LABEL)
             fluor_labels.append(NON_PFAS_LABEL)
         else:
-            formula = row.get("precursor_formula", "")
-            chain_labels.append(chain_length_bin(formula))
-            fluor_labels.append(fluorine_bin(formula))
+            fluor_labels.append(fluorine_bin(row.get("precursor_formula", "")))
 
-    print("Chain length distribution:", Counter(chain_labels))
     print("Fluorine count distribution:", Counter(fluor_labels))
 
     # ── Embeddings ────────────────────────────────────────────────────────────
@@ -334,12 +301,11 @@ def main():
 
         emb_out = Path(args.out).with_suffix(".npz")
         np.savez_compressed(emb_out, coords=coords,
-                            labels_chain=np.array(chain_labels),
                             labels_fluor=np.array(fluor_labels))
         print(f"Saved embeddings to {emb_out}")
 
     # ── Plot ──────────────────────────────────────────────────────────────────
-    make_plot(coords, chain_labels, fluor_labels, args.out, n_pfas, n_nonpfas)
+    make_plot(coords, fluor_labels, args.out, n_pfas, n_nonpfas)
 
 
 if __name__ == "__main__":
