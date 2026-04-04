@@ -1,8 +1,10 @@
-# python scripts/test_PFAS_golden_dataset.py
+# python scripts/test_PFAS_golden_dataset.py positive
+# python scripts/test_PFAS_golden_dataset.py negative
 #
 # Evaluates DreaMS-PFAS on the pre-processed test set TSV.
 # All spectra are true PFAS (is_PFAS=1). Primary metric: Recall at threshold=0.2.
 
+import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -15,12 +17,28 @@ from massspecgym.models.pfas import HalogenDetectorDreamsTest
 from dreams.api import dreams_predictions
 
 # ---------------------------------------------------------------------------
+# Ion mode from command line
+# ---------------------------------------------------------------------------
+if len(sys.argv) < 2 or sys.argv[1].lower() not in ("positive", "negative"):
+    print("Usage: python scripts/test_PFAS_golden_dataset.py positive|negative")
+    sys.exit(1)
+
+ion_mode = sys.argv[1].lower()
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-_LOCAL_TSV  = Path.home() / "Downloads" / "afff_pos_matched_spectra_test_set.tsv"
-_REMOTE_TSV = Path("/teamspace/studios/this_studio/MassSpecGym/afff/afff_pos_matched_spectra_test_set.tsv")
-INPUT_TSV   = _LOCAL_TSV if _LOCAL_TSV.exists() else _REMOTE_TSV
-OUTPUT_CSV = Path("afff_pos_tsv_results.csv")
+_TSV_MAP = {
+    "positive": Path("/teamspace/studios/this_studio/MassSpecGym/afff/afff_pos_matched_spectra_test_set.tsv"),
+    "negative": Path("/teamspace/studios/this_studio/MassSpecGym/afff/neg_matched_spectra_test_set.tsv"),
+}
+_OUTPUT_MAP = {
+    "positive": Path("afff_pos_tsv_results.csv"),
+    "negative": Path("afff_neg_tsv_results.csv"),
+}
+
+INPUT_TSV  = _TSV_MAP[ion_mode]
+OUTPUT_CSV = _OUTPUT_MAP[ion_mode]
 N_PEAKS    = 60
 THRESHOLD  = 0.2
 
@@ -38,7 +56,8 @@ model.eval()
 # ---------------------------------------------------------------------------
 # Load TSV
 # ---------------------------------------------------------------------------
-print(f"\nLoading TSV: {INPUT_TSV}")
+print(f"\nIon mode    : {ion_mode}")
+print(f"Loading TSV : {INPUT_TSV}")
 df = pd.read_csv(INPUT_TSV, sep="\t")
 print(f"Loaded {len(df)} spectra  (is_PFAS=1: {df['is_PFAS'].sum()})")
 
