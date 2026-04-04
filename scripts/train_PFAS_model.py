@@ -127,6 +127,7 @@ gamma = 0.75
 lr = 1e-5 # found 1e-5 as best
 num_iterations = 1
 loss='focal'
+random_init = False  # Set to True to ablate transfer learning (random DreaMS weights)
 
 if DEBUG:
     batch_size = 1
@@ -157,11 +158,13 @@ for i in range(0, num_iterations):
         gamma=gamma,
         batch_size=batch_size,
         lr=lr,
-        loss=loss
+        loss=loss,
+        random_init=random_init,
     )
 
     # initialise the wandb logger and name your wandb project
-    wandb_logger = WandbLogger(project='HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS')
+    init_tag = "RandomInit" if random_init else "Pretrained"
+    wandb_logger = WandbLogger(project=f'HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS-{init_tag}')
     #wandb_logger = WandbLogger(project='PFASDetection-FocalLoss-MergedMassSpecNIST20OECDWith_PFASExceptions')
     #wandb_logger = WandbLogger(project='HalogenDetection-FocalLoss-MergedMassSpecNIST20')
 
@@ -179,6 +182,7 @@ for i in range(0, num_iterations):
     wandb_logger.experiment.config["alpha"] = alpha
     wandb_logger.experiment.config["gamma"] = gamma
     wandb_logger.experiment.config["loss"] = loss
+    wandb_logger.experiment.config["random_init"] = random_init
 
     # Validate before training
     data_module.prepare_data() 

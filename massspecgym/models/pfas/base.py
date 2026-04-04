@@ -42,6 +42,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         threshold: float=0.5,
         hard_neg_weight: float=1,
         loss: str="bce",
+        random_init: bool=False,
         *args,
         **kwargs
     ):
@@ -82,6 +83,13 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             # ckpt_path should be replaced with the path to the ssl_model.ckpt model downloaded from https://zenodo.org/records/10997887
             ckpt_path="https://zenodo.org/records/10997887/files/ssl_model.ckpt?download=1", ckpt_cls=DreaMSModel, n_highest_peaks=60
         ).model.train()
+
+        if random_init:
+            def _reset_weights(m):
+                if hasattr(m, 'reset_parameters'):
+                    m.reset_parameters()
+            self.main_model.apply(_reset_weights)
+            print("DreaMS backbone weights re-initialized from scratch (random_init=True)")
 
         # New classification head for PFAS detection
         self.lin_out = nn.Linear(1024, 1) # for F
