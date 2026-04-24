@@ -174,7 +174,10 @@ def _plot_panel(ax, coords, labels, config, order, title):
     ax.set_xlabel("UMAP 1", fontsize=11, fontweight="bold")
     ax.set_ylabel("UMAP 2", fontsize=11, fontweight="bold")
     ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
-    ax.spines[["top", "right", "left", "bottom"]].set_visible(False)
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(1.2)
+        spine.set_edgecolor("black")
 
     handles = [
         mpatches.Patch(

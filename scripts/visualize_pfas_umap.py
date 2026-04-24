@@ -201,7 +201,10 @@ def _plot_panel(ax, coords: np.ndarray, labels: list, title: str, method: str = 
     ax.set_xlabel(f"{method} 1", fontsize=11, fontweight="bold")
     ax.set_ylabel(f"{method} 2", fontsize=11, fontweight="bold")
     ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
-    ax.spines[["top", "right", "left", "bottom"]].set_visible(False)
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(1.2)
+        spine.set_edgecolor("black")
 
     # Legend: Non-PFAS first, then subtypes
     handles = [
