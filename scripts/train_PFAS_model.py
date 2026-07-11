@@ -1,3 +1,5 @@
+from math import e
+from massspecgym.data.datasets import T
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
@@ -35,8 +37,6 @@ import time
 
 numpy.set_printoptions(threshold=sys.maxsize)
 
-seed = int(time.time())
-pl.seed_everything(seed)
 #pl.seed_everything(0)
 
 DEBUG = False
@@ -125,9 +125,9 @@ threshold = 0.2
 alpha = 0.25
 gamma = 0.75
 lr = 1e-5 # found 1e-5 as best
-num_iterations = 1
-loss='focal'
-random_init = False  # Set to True to ablate transfer learning (random DreaMS weights)
+num_iterations = 3
+loss='bce'
+random_init = True  # Set to True to ablate transfer learning (random DreaMS weights)
 
 if DEBUG:
     batch_size = 1
@@ -135,6 +135,10 @@ else:
     batch_size = 64
 
 for i in range(0, num_iterations):
+
+    seed = int(time.time())
+    pl.seed_everything(seed)
+
     # Load dataset
     dataset = TestMassSpecDataset(
         spec_transform=SpecTokenizer(n_peaks=n_peaks),
@@ -153,6 +157,7 @@ for i in range(0, num_iterations):
     print(f'learning_rate = {lr}')
     # Init model
     model = HalogenDetectorDreamsTest(
+        seed=seed,
         threshold=threshold,
         alpha=alpha,
         gamma=gamma,
@@ -163,8 +168,10 @@ for i in range(0, num_iterations):
     )
 
     # initialise the wandb logger and name your wandb project
-    init_tag = "RandomInit" if random_init else "Pretrained"
-    wandb_logger = WandbLogger(project=f'HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS-{init_tag}')
+    if random_init:
+        wandb_logger = WandbLogger(project=f'HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS-RandomInit')
+    else:
+        wandb_logger = WandbLogger(project=f'HalogenDetection-FocalLoss-MergedMassSpecNIST20_NISTNew_NormalPFAS')
     #wandb_logger = WandbLogger(project='PFASDetection-FocalLoss-MergedMassSpecNIST20OECDWith_PFASExceptions')
     #wandb_logger = WandbLogger(project='HalogenDetection-FocalLoss-MergedMassSpecNIST20')
 
