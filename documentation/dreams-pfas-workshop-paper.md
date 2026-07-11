@@ -184,19 +184,80 @@ this pass), just the architecture:
     0/1 float, consistent with how `StandardMeta` in
     `massspecgym/data/transforms.py` already embeds `adduct`/instrument
     type elsewhere in this codebase.
-- **Decision:** pending. Full writeup of the four options (concat+linear,
-  concat+FFN, FiLM, gated heads) with diagrams, code sketches, parameter
-  counts, and a recommendation was prepared for mentor review:
-  `documentation/dreams-pfas-ion-mode-fusion-options.md`. Recommendation
-  in that doc: prototype concat+FFN and FiLM side by side first; hold
-  gated/expert heads until after the dataset is enlarged (they're most
-  sensitive to the current mode imbalance).
+- **Decision (updated 2026-07-11):** full writeup of the four options
+  (concat+linear, concat+FFN, FiLM, gated heads) with diagrams, code
+  sketches, parameter counts, and a recommendation was prepared for
+  mentor review: `documentation/dreams-pfas-ion-mode-fusion-options.md`.
+  Mentor confirmed wanting options B (concat+FFN) and C (FiLM) built
+  overall; user asked to implement the simplest variant, **Option A
+  (concat + single linear layer)**, first as a fast floor/sanity-check
+  benchmark before investing in B/C. Implemented in this session — see
+  §7.1 below.
 
 ## 7. Status
 
-Architecture discussion in progress for Step 1 (see §6). No code written
-yet. Once an ion-mode fusion approach is picked, build: (a) dataset
-subclass exposing a clean `ion_mode` field, (b) new model class
-implementing the chosen fusion, (c) rerun on the existing merged dataset to
-compare against the ISEF paper's binary baseline, before touching
-Enveda-180 (step 2 of Roman's roadmap).
+**Option A (concat + single linear layer) is implemented and locally
+verified** (2026-07-11); full-scale benchmark training still needs to run
+on the user's remote environment (see §7.1). Options B (concat+FFN) and C
+(FiLM) are the next planned passes, reusing the same dataset/helper code.
+
+### 7.1 Option A implementation (done)
+
+Plan used: `/Users/ramsindhu/.claude/plans/sprightly-painting-comet.md`
+(local Claude Code plan file, not in the repo).
+
+New/changed files:
+- `massspecgym/data/transforms.py` — added
+  `ion_mode_idx_from_adduct(adduct) -> int` (0=negative, 1=positive,
+  2=unknown), mirroring the suffix logic already in
+  `scripts/visualize_pfas_umap_ionization.py:ionization_mode()`.
+- `massspecgym/models/pfas/ion_mode_linear.py` (new) —
+  `HalogenDetectorDreamsIonModeLinear(HalogenDetectorDreamsTest)`. Replaces
+  the parent's `Linear(1024,1)` head with `Linear(1024+3,1)` over
+  `concat([embedding, one_hot(ion_mode, 3)])`. Overrides `forward`,
+  `_step_bce_loss`, `_step_focal_loss`, `on_batch_end` to thread
+  `batch["ion_mode"]` through; everything else (metrics, epoch-end
+  logging, calibration curve/PR table saving) inherited unchanged.
+- `massspecgym/models/pfas/__init__.py` — now exports
+  `HalogenDetectorDreamsIonModeLinear` alongside the original
+  `HalogenDetectorDreamsTest`.
+- `scripts/train_PFAS_ion_mode_linear_model.py` (new) — near-duplicate of
+  `scripts/train_PFAS_model.py`. New `IonModeMassSpecDataset` (same body as
+  `TestMassSpecDataset` plus `item['ion_mode'] = ion_mode_idx_from_adduct(...)`
+  computed before the tensor-cast loop). Same hyperparameters as the
+  original script (threshold=0.2, alpha=0.25, gamma=0.75, lr=1e-5,
+  batch_size=64, loss='focal'). New W&B project name
+  (`HalogenDetection-FocalLoss-IonModeLinear-MergedMassSpecNIST20_NISTNew`).
+  Real training data path (`.../merged_massspec_nist20_nist_new_with_fold.tsv`)
+  is Lightning.ai-Studio-only and doesn't exist in this local checkout.
+
+**Local verification performed** (env: conda `dreams_gradio`, which has
+torch/matchms/dreams/massspecgym installed — the base env does not):
+1. Unit-checked `ion_mode_idx_from_adduct` on `"[M+H]+"` (→1), `"[M-H]-"`
+   (→0), `"weird"`/`None` (→2).
+2. Unit-tested `HalogenDetectorDreamsIonModeLinear.forward()`/`backward()`
+   with the real DreaMS backbone mocked out (avoids downloading the
+   ~500MB Zenodo checkpoint for a pure architecture check) — confirmed
+   output shape `[B]`, gradients populate on `lin_out` weight/bias, and
+   `lin_out.in_features == 1027`.
+3. Ran `IonModeMassSpecDataset` against the real local debug MGF
+   (`data/debug/example_5_spectra.mgf`, 5 positive-mode spectra) — confirmed
+   `ion_mode` derived correctly (all 1.0) and spec tensor shape intact.
+4. Ran the real `MassSpecDataModule` + `collate_fn` (default_collate) over
+   that debug set — confirmed the new `"ion_mode"` key collates into a
+   proper `[B]` float tensor alongside existing keys, closing the
+   collation-risk concern flagged during planning.
+5. All 4 touched/added files (`transforms.py`, `ion_mode_linear.py`,
+   `pfas/__init__.py`, `train_PFAS_ion_mode_linear_model.py`) compile
+   cleanly (`py_compile`).
+
+**Not done locally (needs the user's remote environment):** an actual
+`trainer.fit()`/`trainer.validate()` run against the real DreaMS checkpoint
+and the full merged MassSpecGym+NIST20+NIST-PFAS TSV, i.e. the real
+precision/recall/F1 benchmark vs. the ISEF baseline (93.8%/89%/0.91). Next
+step for the user: copy/run `scripts/train_PFAS_ion_mode_linear_model.py`
+in the Lightning.ai Studio environment where the merged TSV lives, then
+report back the benchmark numbers so we can decide whether to proceed to
+Option B (FFN) regardless (per the plan, B is the next step either way,
+since Option A was expected to be a weak floor).
+

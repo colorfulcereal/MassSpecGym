@@ -691,3 +691,17 @@ class StandardMeta(MetaTransform):
         for key in self.collate_keys:
             collate_data_d[key] = torch.stack(batch_data_d[key],dim=0)
         return collate_data_d
+
+
+def ion_mode_idx_from_adduct(adduct) -> int:
+    """
+    Maps an adduct string to an ionization-mode class index: 0 = negative,
+    1 = positive, 2 = unknown. Mirrors the suffix-based logic in
+    scripts/visualize_pfas_umap_ionization.py:ionization_mode().
+    """
+    a = str(adduct).strip()
+    if a.endswith("+"):
+        return 1
+    if a.endswith("-") or a.endswith("–"):
+        return 0
+    return 2
