@@ -131,7 +131,7 @@ alpha = 0.25
 gamma = 0.75
 lr = 1e-5 # found 1e-5 as best
 num_iterations = 1
-loss='focal'
+loss='bce'
 random_init = False  # Set to True to ablate transfer learning (random DreaMS weights)
 
 if DEBUG:

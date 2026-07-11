@@ -138,5 +138,5 @@ def scan_and_run_pfas(directory, output_csv="pfas_hits.csv", threshold=0.95):
 
 # Example usage:
 output_csv = '/teamspace/studios/this_studio/mzML_files/pfas_hits.csv'
-file_path = '/teamspace/studios/this_studio/mzML_files/Moorea24_MSRun_mzml'
+file_path = '/teamspace/studios/this_studio/mzML_files/MSV000100240/raw/agilent_pos'
 final_results = scan_and_run_pfas(file_path, output_csv=output_csv, threshold=0.9)

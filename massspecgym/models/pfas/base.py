@@ -36,6 +36,7 @@ n_examples_to_sample = 2000
 class HalogenDetectorDreamsTest(MassSpecGymModel):
     def __init__(
         self,
+        seed: int=0,
         alpha: float=0.25,
         gamma: float=0.5,
         batch_size: int=64,
@@ -54,7 +55,8 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         #     self.alpha = torch.tensor([1-alpha, alpha], device=mps_device)
         # else:
         #     self.alpha = torch.tensor([1-alpha, alpha]).cuda() 
-
+        
+        self.seed = seed
         self.register_buffer("alpha_vec", torch.tensor([1 - alpha, alpha], dtype=torch.float32))
         self.gamma = gamma
         self.batch_size = batch_size
@@ -350,14 +352,13 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             for i, ident in enumerate(fn_samples["identifier"].tolist(), 1):
                 f.write(f"  {i}. {ident}\n")
 
-        pred_prob_filename = "pfas_pred_probs.csv"
         # Find the predicted probabilities for all PFAS
         df_p = df_preds[(df_preds["true_label"] == 1)]
-        df_p["pred_prob"].to_csv(pred_prob_filename, index=False)
+        df_p["pred_prob"].to_csv(f"pfas_pred_probs.csv", index=False)
 
         print(f"True Positive identifiers written to {tp_filename}")
         print(f"False Negative identifiers wth probability < 0.2 written to {fn_filename}")
-        print(f"Predicted Probabilities Positives written to {pred_prob_filename}")
+        print(f"Predicted Probabilities Positives written")
 
         self.save_precision_recall_table()
         self.save_calibration_curve()
@@ -395,7 +396,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
 
         print("\n=== Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ===")
         print(df_thresh.to_string(index=False))
-        df_thresh.to_csv("pr_table.csv", index=False)
+        df_thresh.to_csv(f"pr_table_{self.seed}.csv", index=False)
 
 
     def save_calibration_curve(self) -> None:
@@ -411,7 +412,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             'mean_predicted_prob': mean_predicted_prob,
             'fraction_of_positives': fraction_of_positives
         })
-        df_calibration.to_csv('calibration_curve.csv', index=False)
+        df_calibration.to_csv(f"calibration_curve_{self.seed}.csv", index=False)
 
         # --- Save score distribution data ---
         df_scores = pd.DataFrame({
@@ -419,7 +420,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             'true_label': y_true,
             'class': ['PFAS' if t == 1 else 'Non-PFAS' for t in y_true]
         })
-        df_scores.to_csv('score_distribution.csv', index=False)
+        df_scores.to_csv(f"score_distribution_{self.seed}.csv", index=False)
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
