@@ -158,6 +158,7 @@ for i in range(0, num_iterations):
     print(f'learning_rate = {lr}')
     # Init model
     model = HalogenDetectorDreamsIonModeLinear(
+        seed=seed,
         threshold=threshold,
         alpha=alpha,
         gamma=gamma,
@@ -169,7 +170,7 @@ for i in range(0, num_iterations):
 
     # initialise the wandb logger and name your wandb project
     init_tag = "RandomInit" if random_init else "Pretrained"
-    wandb_logger = WandbLogger(project=f'HalogenDetection-FocalLoss-IonModeLinear-MergedMassSpecNIST20_NISTNew-{init_tag}')
+    wandb_logger = WandbLogger(project=f'PFASDetection-IonMode-MergedMassSpecNIST20_NISTNew')
 
     trainer = Trainer(
             accelerator="auto",
