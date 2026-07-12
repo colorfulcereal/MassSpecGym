@@ -422,7 +422,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
                 if n == 0:
                     continue
                 df_mode = self._compute_pr_table(y_true[mask], y_prob[mask])
-                out_pth = f"pr_table_ion_mode_{mode_name}.csv"
+                out_pth = f"pr_table_ion_mode_{mode_name}_{self.seed}.csv"
                 df_mode.to_csv(out_pth, index=False)
                 print(f"\n=== Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ({mode_name} mode, n={n}) ===")
                 print(df_mode.to_string(index=False))

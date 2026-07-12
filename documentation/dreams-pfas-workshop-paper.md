@@ -375,3 +375,54 @@ user: rerun training (baseline and/or Option A) remotely and check for
 `pr_table_ion_mode_positive.csv` / `pr_table_ion_mode_negative.csv` in the
 output alongside the existing `pr_table.csv`.
 
+**Naming note (bug found + fixed 2026-07-12):** `save_precision_recall_table`
+now writes the aggregate table as `pr_table_{self.seed}.csv` (a change
+made independently to support the multi-seed run loop, distinguishing
+output across runs like `pr_table_0.csv`, `pr_table_1783816586.csv`, etc. —
+matches the files aggregated in §7.1.1). The per-ion-mode files added
+above initially did NOT include this seed suffix, which would have caused
+every multi-run per-mode CSV to silently overwrite the previous run's —
+defeating the purpose for the same reason the aggregate table needed the
+seed suffix. Fixed while verifying Option B: per-mode filenames are now
+`pr_table_ion_mode_{mode_name}_{self.seed}.csv`, consistent with the
+aggregate table's naming.
+
+## 9. Option B (concat + FFN) implementation (done, 2026-07-12)
+
+Built as a **fully separate model class + training script**, per explicit
+request, so Option A (running remotely) and Option B can be launched
+independently without either disturbing the other. No existing
+Option-A file was touched except the one-line bug fix above.
+
+- `massspecgym/models/pfas/ion_mode_ffn.py` (new) —
+  `HalogenDetectorDreamsIonModeFFN(HalogenDetectorDreamsTest)`. Same
+  concat-with-one-hot-ion-mode input as Option A, but replaces the single
+  `Linear(1024+3,1)` head with `Linear(1024+3,128) → ReLU → Linear(128,1)`
+  (`hidden_dim=128`, configurable). `_step_bce_loss`/`_step_focal_loss`/
+  `on_batch_end` mirror `ion_mode_linear.py`'s bodies exactly (same
+  ion_mode plumbing, same per-mode PR-table reporting inherited from the
+  shared base class — no changes needed there for Option B to get it).
+- `massspecgym/models/pfas/__init__.py` — additive export of the new
+  class alongside the existing two.
+- `scripts/train_PFAS_ion_mode_ffn_model.py` (new) — mirrors
+  `train_PFAS_ion_mode_linear_model.py`'s current state (seed loop,
+  `loss='bce'`) exactly, swapping in the FFN model
+  (`hidden_dim=128` passed explicitly) and a distinct W&B project name
+  (`PFASDetection-IonModeFFN-MergedMassSpecNIST20_NISTNew`) so run
+  history doesn't collide with Option A's.
+
+**Local verification:** unit-tested `forward()`/`backward()` with a mocked
+DreaMS backbone (`fc1.in_features==1027`, `fc1.out_features==128`,
+`fc2.in_features==128`, gradients populate all 4 fc1/fc2 params). Reran
+the real dataset→dataloader→model→`save_precision_recall_table` pipeline
+against the local debug MGF and confirmed `pr_table_0.csv` +
+`pr_table_ion_mode_positive_0.csv` only (no negative/unknown, all-positive
+debug set) — same pattern as Option A's equivalent check. Confirmed via
+`git status`/`git diff --stat` that only the intended files changed
+(2 new files, 1 additive `__init__.py` edit, 1 one-line bug fix in
+`base.py` shared by both options).
+
+**Not done locally:** full-scale benchmark training against the real
+merged dataset — needs the user's remote environment, run independently
+of the in-progress Option A run.
+
