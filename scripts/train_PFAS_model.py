@@ -11,7 +11,7 @@ import torch.optim as optim
 import pandas as pd
 
 from massspecgym.data import MassSpecDataset, MassSpecDataModule
-from massspecgym.data.transforms import SpecTokenizer, MolFingerprinter
+from massspecgym.data.transforms import SpecTokenizer, MolFingerprinter, ion_mode_idx_from_adduct
 from massspecgym.models.base import Stage
 from massspecgym.models.retrieval.base import MassSpecGymModel
 from massspecgym.models.pfas import HalogenDetectorDreamsTest
@@ -76,6 +76,11 @@ class TestMassSpecDataset(MassSpecDataset):
             item['F'] = 1
         else:
             item['F'] = 0
+
+        # ionization mode: 0 = negative, 1 = positive, 2 = unknown
+        # (used for per-ion-mode breakdown reporting only; not consumed
+        # by this model's forward()/loss, so training is unaffected)
+        item['ion_mode'] = ion_mode_idx_from_adduct(metadata["adduct"])
 
         if transform_spec and self.spec_transform:
             if isinstance(self.spec_transform, dict):

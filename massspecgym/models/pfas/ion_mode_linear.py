@@ -135,6 +135,7 @@ class HalogenDetectorDreamsIonModeLinear(HalogenDetectorDreamsTest):
             self.all_predicted_probs.extend(pred_probs_flat)
             self.all_true_labels.extend(true_labels.detach().cpu().numpy().tolist())
             self.all_identifiers.extend(identifiers)
+            self.all_ion_modes.extend(ion_mode.detach().cpu().numpy().tolist())
 
             if spectra is not None:
                 self.all_spectra.extend([s.detach().cpu().numpy() for s in spectra])

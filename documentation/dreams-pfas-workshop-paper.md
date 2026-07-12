@@ -196,10 +196,13 @@ this pass), just the architecture:
 
 ## 7. Status
 
-**Option A (concat + single linear layer) is implemented and locally
-verified** (2026-07-11); full-scale benchmark training still needs to run
-on the user's remote environment (see §7.1). Options B (concat+FFN) and C
-(FiLM) are the next planned passes, reusing the same dataset/helper code.
+**Option A (concat + single linear layer) is implemented, locally
+verified, and benchmarked** (2026-07-11/12) — see §7.1.1 for results:
+recall improved over the ISEF baseline at the paper's chosen threshold,
+precision roughly unchanged. Now adding per-ion-mode (pos/neg) breakdown
+reporting per mentor request (§8). Options B (concat+FFN) and C (FiLM)
+are the next planned architecture passes, reusing the same dataset/helper
+code.
 
 ### 7.1 Option A implementation (done)
 
@@ -251,13 +254,124 @@ torch/matchms/dreams/massspecgym installed — the base env does not):
    `pfas/__init__.py`, `train_PFAS_ion_mode_linear_model.py`) compile
    cleanly (`py_compile`).
 
-**Not done locally (needs the user's remote environment):** an actual
-`trainer.fit()`/`trainer.validate()` run against the real DreaMS checkpoint
-and the full merged MassSpecGym+NIST20+NIST-PFAS TSV, i.e. the real
-precision/recall/F1 benchmark vs. the ISEF baseline (93.8%/89%/0.91). Next
-step for the user: copy/run `scripts/train_PFAS_ion_mode_linear_model.py`
-in the Lightning.ai Studio environment where the merged TSV lives, then
-report back the benchmark numbers so we can decide whether to proceed to
-Option B (FFN) regardless (per the plan, B is the next step either way,
-since Option A was expected to be a weak floor).
+**Update (2026-07-12): the remote benchmark run is done** — see §7.1.1
+below for results. (Originally this section noted the remote run as
+outstanding; superseded now that results are back.)
+
+### 7.1.1 Option A benchmark results (n=3 runs)
+
+Training was run on the user's Lightning.ai Studio environment (real
+DreaMS checkpoint + full merged MassSpecGym+NIST20+NIST-PFAS TSV). 3 runs'
+`pr_table.csv` outputs were collected in
+`~/Downloads/DreaMS-PFAS-Paper/OptionA-Results/` (outside the repo, not
+committed to git) and aggregated (mean ± 2SE per threshold, thresholds 0.0
+and 1.0 dropped) into
+`~/Downloads/DreaMS-PFAS-Paper/OptionA-Results/pr_table_aggregated_mean_2se.csv`.
+
+**Aggregated Option A results (n=3 runs):**
+
+| Threshold | Precision % (mean ± 2SE) | Recall % (mean ± 2SE) | F1 (mean ± 2SE) |
+|---|---|---|---|
+| 0.1 | 90.7 ± 5.9 | 91.7 ± 0.4 | 0.911 ± 0.028 |
+| 0.2 | 93.4 ± 4.0 | 91.5 ± 0.5 | 0.924 ± 0.018 |
+| 0.3 | 94.9 ± 2.9 | 91.5 ± 0.5 | 0.931 ± 0.012 |
+| 0.4 | 95.8 ± 2.3 | 89.0 ± 4.8 | 0.922 ± 0.023 |
+| 0.5 | 96.7 ± 1.7 | 84.8 ± 8.8 | 0.902 ± 0.050 |
+| 0.6 | 97.2 ± 2.2 | 72.5 ± 8.0 | 0.830 ± 0.057 |
+| 0.7 | 97.5 ± 2.2 | 62.5 ± 0.1 | 0.762 ± 0.007 |
+| 0.8 | 98.0 ± 2.1 | 59.2 ± 1.5 | 0.738 ± 0.010 |
+| 0.9 | 98.8 ± 1.4 | 56.3 ± 1.3 | 0.717 ± 0.007 |
+
+**Comparison to the ISEF baseline (binary/spectral-only model, Table 3,
+n=5 runs)** at the paper's chosen threshold 0.2:
+
+| Metric | Baseline (n=5) | Option A (n=3) | Delta |
+|---|---|---|---|
+| Precision | 93.8 ± 2.7 | 93.4 ± 4.0 | ~unchanged, well within error bars |
+| Recall | 89.0 ± 1.6 | 91.5 ± 0.5 | **+2.5 pts, non-overlapping ±2SE bands, tighter spread** |
+| F1 | 0.91 ± 0.02 | 0.924 ± 0.018 | +0.014 |
+
+Precision is essentially flat vs. the baseline, but recall is meaningfully
+higher — the ±2SE bands don't overlap (baseline [87.4, 90.6] vs. Option A
+[91.1, 92.0]) — and more consistent across runs (SE shrank from ±1.6 to
+±0.5). The gap is even larger at stricter thresholds, where the baseline's
+recall falls off a cliff but Option A degrades more gradually:
+
+| Threshold | Baseline recall | Option A recall |
+|---|---|---|
+| 0.3 | 86.6 ± 5.8 | 91.5 ± 0.5 |
+| 0.4 | 81.3 ± 9.5 | 89.0 ± 4.8 |
+| 0.5 | 73.3 ± 7.3 | 84.8 ± 8.8 |
+| 0.6 | 62.2 ± 0.6 | 72.5 ± 8.0 |
+
+Option A's peak F1 (0.931 at threshold 0.3) also exceeds the baseline's
+peak (0.91).
+
+**Caveat:** Option A is only n=3 runs vs. the baseline's n=5 — SE
+estimates are noisier with fewer samples. Treat this as an encouraging
+signal (consistent with the mentor's hypothesis that giving the model
+explicit polarity information should help), not yet a conclusive result.
+Two more runs would bring Option A to parity (n=5) for a cleaner
+comparison — not yet done.
+
+Given even the simplest fusion (concat + single linear layer, expected to
+be a "weak floor" per the fusion-options doc) already shows a plausible
+recall gain, this is a reasonable basis to proceed to Option B (FFN)
+regardless of exact statistical significance here.
+
+## 8. Per-ion-mode (pos/neg) breakdown reporting (done, 2026-07-12)
+
+Mentor request: *"it would be good to see the performance split by ion
+mode, separately for pos and neg after training."* Until this, all
+validation reporting (`pr_table.csv`, calibration curve, TP/FN dumps) was
+aggregated across all validation spectra regardless of polarity — there
+was no way to see whether recall/precision differ between positive- and
+negative-mode spectra, which is the central axis of this whole effort.
+
+**What changed:**
+- `massspecgym/models/pfas/base.py` (shared parent class,
+  `HalogenDetectorDreamsTest`): `_reset_metrics_val` now also resets
+  `self.all_ion_modes = []`; `on_batch_end` collects `batch.get("ion_mode")`
+  per validation sample (or `None` placeholders when absent, keeping the
+  list index-aligned with `all_true_labels`/`all_predicted_probs`). The
+  threshold-sweep loop in `save_precision_recall_table` was factored into
+  `_compute_pr_table(y_true, y_prob) -> pd.DataFrame` (no behavior change
+  to the existing `pr_table.csv` output). `save_precision_recall_table`
+  now additionally writes `pr_table_ion_mode_{negative,positive,unknown}.csv`
+  for any mode with at least one sample, using the same threshold-sweep
+  logic — silently skipped entirely when no ion_mode data was collected
+  (fully backward compatible with datasets/models that don't have it).
+- `massspecgym/models/pfas/ion_mode_linear.py`
+  (`HalogenDetectorDreamsIonModeLinear`): its `on_batch_end` override
+  (which already has `ion_mode` in scope) now also appends it to
+  `self.all_ion_modes`.
+- `scripts/train_PFAS_model.py` (the original ISEF baseline script):
+  `TestMassSpecDataset` now also derives
+  `item['ion_mode'] = ion_mode_idx_from_adduct(metadata["adduct"])`,
+  mirroring the fix already in `IonModeMassSpecDataset`. This is purely
+  additive — the baseline model's `forward()`/loss/predictions don't
+  consume `ion_mode` at all, so training behavior is unchanged — but it
+  means the **original baseline can now also produce a per-mode
+  breakdown**, which is the strongest comparison for the paper: whether
+  the baseline's recall is worse on positive-mode spectra, and whether the
+  ion-mode-aware models close that gap.
+
+**Local verification:** unit-tested `save_precision_recall_table` with
+mocked DreaMS backbone across 3 scenarios — mixed 0/1/2 ion modes (writes
+all 3 per-mode files + aggregate), all-`None` ion modes (writes only the
+aggregate, no per-mode files, confirming backward compatibility), and
+positive-mode-only data (writes aggregate + positive file only, no
+negative/unknown). Also re-ran the real dataset → dataloader → model →
+`save_precision_recall_table` pipeline end-to-end against the local debug
+MGF (`data/debug/example_5_spectra.mgf`, all positive-mode) and confirmed
+the same positive-only file pattern through the real (non-mocked) data
+path. All touched files compile cleanly.
+
+**Not done locally:** an actual per-mode breakdown on the real merged
+training data (to see the real positive- vs. negative-mode
+precision/recall gap for both the baseline and Option A) — needs a
+Lightning.ai Studio run, same limitation as before. Next step for the
+user: rerun training (baseline and/or Option A) remotely and check for
+`pr_table_ion_mode_positive.csv` / `pr_table_ion_mode_negative.csv` in the
+output alongside the existing `pr_table.csv`.
 

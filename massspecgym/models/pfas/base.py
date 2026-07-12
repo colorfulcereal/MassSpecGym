@@ -231,11 +231,17 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             # ---- store probabilities for AUROC/AP ----
             identifiers = batch.get("identifier", ["NA"] * len(true_labels))
             spectra = batch.get("spec", None)
+            ion_modes = batch.get("ion_mode", None)
 
             pred_probs_flat = pred_probs.detach().cpu().numpy().tolist()
             self.all_predicted_probs.extend(pred_probs_flat)
             self.all_true_labels.extend(true_labels.detach().cpu().numpy().tolist())
             self.all_identifiers.extend(identifiers)
+
+            if ion_modes is not None:
+                self.all_ion_modes.extend(ion_modes.detach().cpu().numpy().tolist())
+            else:
+                self.all_ion_modes.extend([None] * len(true_labels))
 
             if spectra is not None:
                 self.all_spectra.extend([s.detach().cpu().numpy() for s in spectra])
@@ -264,6 +270,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         self.all_true_labels = []
         self.all_identifiers = []
         self.all_spectra = []
+        self.all_ion_modes = []  # 0=negative, 1=positive, 2=unknown; None if not available for this batch
 
 
     def on_train_epoch_start(self) -> None:
@@ -364,10 +371,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         self.save_calibration_curve()
 
 
-    def save_precision_recall_table(self) -> None:
-        y_true = np.array(self.all_true_labels)
-        y_prob = np.array(self.all_predicted_probs)
-
+    def _compute_pr_table(self, y_true: np.ndarray, y_prob: np.ndarray) -> pd.DataFrame:
         thresholds = np.arange(0.0, 1.01, 0.1)
         rows = []
 
@@ -389,14 +393,40 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
 
             rows.append((t, precision, recall, accuracy, f1, tpr, fpr))
 
-        df_thresh = pd.DataFrame(
+        return pd.DataFrame(
             rows,
             columns=["threshold", "precision", "recall", "accuracy", "f1", "tpr", "fpr"]
         )
 
+    def save_precision_recall_table(self) -> None:
+        y_true = np.array(self.all_true_labels)
+        y_prob = np.array(self.all_predicted_probs)
+
+        df_thresh = self._compute_pr_table(y_true, y_prob)
+
         print("\n=== Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ===")
         print(df_thresh.to_string(index=False))
         df_thresh.to_csv(f"pr_table_{self.seed}.csv", index=False)
+
+        # ---- optional per-ion-mode breakdown (0=negative, 1=positive, 2=unknown) ----
+        # Only produced when the dataset actually supplies an "ion_mode" field
+        # (e.g. IonModeMassSpecDataset); silently skipped otherwise so this
+        # stays backward compatible with datasets that don't have it.
+        ion_modes = np.array(self.all_ion_modes, dtype=object)
+        has_ion_mode = (ion_modes != None).any()  # noqa: E711 (elementwise None check)
+        if has_ion_mode:
+            mode_names = {0: "negative", 1: "positive", 2: "unknown"}
+            for mode_idx, mode_name in mode_names.items():
+                mask = (ion_modes == mode_idx)
+                n = int(mask.sum())
+                if n == 0:
+                    continue
+                df_mode = self._compute_pr_table(y_true[mask], y_prob[mask])
+                out_pth = f"pr_table_ion_mode_{mode_name}.csv"
+                df_mode.to_csv(out_pth, index=False)
+                print(f"\n=== Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ({mode_name} mode, n={n}) ===")
+                print(df_mode.to_string(index=False))
+                print(f"Wrote per-mode PR table for {mode_name} mode to {out_pth}")
 
 
     def save_calibration_curve(self) -> None:
