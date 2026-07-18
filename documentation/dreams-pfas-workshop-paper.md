@@ -885,3 +885,299 @@ this intended semantics, and Head 3 of the planned multi-head model can
 use them as-is (CF2/CF3 remain co-occurrable with *each other*, just not
 with chain, by design).
 
+## 16. Real Murcko Histogram Split implemented, replacing the stopgap random split (2026-07-17)
+
+Replaced the combined dataset's stopgap stratified-random fold assignment
+with the actual methodology referenced throughout this project --
+https://dreams-docs.readthedocs.io/en/latest/tutorials/murcko_hist_split.html
+-- reusing `dreams.algorithms.murcko_hist.murcko_hist.{murcko_hist,are_sub_hists}`
+directly (already installed as a `dreams` package dependency, not
+reimplemented; not exported from the package's `__init__.py` but
+importable via the direct submodule path). `scripts/prepare_combined_nistpfas_enveda180_dataset.py`'s
+`assign_folds()` now implements the tutorial's exact algorithm: group
+unique molecules by Murcko histogram, sort by group size descending,
+walk from the median-frequency group toward the most-frequent one,
+assigning each group to val unless it's structurally close
+(`are_sub_hists`, k=3, d=4) to an already-assigned val group, until
+cumulative val molecule count exceeds `val_mols_frac` (tutorial default
+0.15); everything less frequent than the median is bulk-assigned to
+train.
+
+**Result:** 184,433 unique molecules -> 101 distinct Murcko histograms.
+Molecule-level split: 75.92% train / 24.08% val (tutorial's own
+MassSpecGym reference: 80.55%/19.45% -- in the right ballpark, exact
+ratio is inherently approximate since whole histogram-groups move as a
+unit).
+
+### 16.1 Critical finding: chain-PFAS collapsed almost entirely into val
+
+Per-category spectrum-level breakdown (added to the script's output,
+per user request to check every category's train/val representation):
+
+| Category | Train | Val |
+|---|---|---|
+| Chain-PFAS | 4 (0.02%) | 19,891 (99.98%) |
+| Drug-like isolated | 55,263 (67.98%) | 26,029 (32.02%) |
+| Other fluorinated | 147,526 (78.12%) | 41,327 (21.88%) |
+| Non-fluorinated | 665,786 (74.59%) | 226,858 (25.41%) |
+
+**This confirms the acyclic-Murcko-scaffold risk flagged before
+implementation.** Murcko scaffolds are defined by ring systems -- NIST-
+PFAS's chain-PFAS reference molecules are mostly acyclic perfluorocarbon
+chains (no rings at all), so they collapse into the same (empty)
+histogram group(s). Whichever fold that group lands in gets nearly all
+of it. Here, it landed almost entirely in **val**, leaving only 4
+chain-PFAS spectra in train -- essentially no chain-PFAS training signal
+left for any future model trained on this exact split, even though val
+now has abundant chain-PFAS examples (19,891) to evaluate against. A
+smaller dry run (--limit-enveda 20000) showed the same pattern (97.31%
+val), confirming this is a systematic effect of the methodology on this
+particular dataset, not a fluke of the full run.
+
+**Not yet resolved with the user** -- flagged here for visibility. Chain
+-PFAS's virtual disappearance from train is a real problem for any model
+that needs to learn chain-PFAS detection using this split, orthogonal to
+the split being technically "leak-free."
+
+### 16.2 Tanimoto similarity validation (real methodology, replacing evaluate_split)
+
+Attempted to reuse `dreams.utils.data.evaluate_split` (the tutorial's own
+validation function, Code Cell 10 / ISEF paper Figure 4) directly, but
+found two real problems at this dataset's scale, both confirmed
+empirically, not assumed:
+
+1. **A genuine bug:** `evaluate_split`'s internal loop only computes
+   similarities for whichever fold name happens to be *last* in
+   `df[fold_col].unique()` (row-order dependent) -- it does not compute
+   both train and val despite the tutorial's usage implying it does. On
+   the dry-run data, this returned a `'train'` key holding **train-vs-
+   train self-similarity** (uniformly 1.0 for every value) instead of the
+   intended val-vs-train comparison -- confirmed by seeing exactly 1.0
+   for every one of 2,365 "validation" values, an impossible result for a
+   real cross-fold comparison.
+2. **Too slow at this scale regardless:** its Python-level per-pair
+   `DataStructs.FingerprintSimilarity` loop is O(V x T) individual calls
+   -- 44,415 val x 140,018 train = ~6.2 billion comparisons, which did not
+   finish in several minutes even with 4 workers.
+
+**Resolution:** `scripts/plot_combined_dataset_tanimoto_split.py`
+reimplements the same statistic without depending on `evaluate_split`,
+using RDKit's vectorized `DataStructs.BulkTanimotoSimilarity` (one call
+per val molecule against the whole train reference set, C++ vectorized
+rather than a Python loop) plus a configurable train-side subsample
+(default 20,000, for speed at this scale) via `dreams.utils.mols.morgan_fp`
+for fingerprints (same fingerprinting function `evaluate_split` uses
+internally).
+
+**Result (n=44,415 val molecules, train reference subsampled to
+20,000):** mean similarity 0.445, median 0.439, max 0.956, **0
+near-duplicate (>=0.99) matches** -- a healthy, no-leakage distribution,
+comparable in shape to the ISEF paper's own Figure 4. Plot saved to
+`~/Downloads/DreaMS-PFAS-Paper/tanimoto_split_quality.png`.
+
+### 16.3 Verification
+
+Confirmed the regenerated combined TSV (same schema, only `fold` values
+changed) still loads correctly through the real `IonModeMassSpecDataset`
++ `MassSpecDataModule` pipeline with zero code changes: 1,182,684 total
+spectra, 868,579 train / 314,105 val (73.4%/26.6% at the spectrum level).
+
+## 17. Fix: preserve NIST-PFAS's original fold, only Murcko-split Enveda-180 (2026-07-17)
+
+User asked to check NIST-PFAS's fold assignment in the *original* source
+merged TSV, to see if it could just be reused instead of letting the
+fresh split assign it. Checked directly: **23,471 train / 920 val
+spectra (96.2%/3.8%), 100 train / 3 val unique molecules (97.1%/2.9%)**
+-- the same split the ISEF paper's own Table 3 metrics were computed
+against. This is the opposite profile from section 16.1's problem (chain-
+PFAS ending up 99.98% in val) -- confirming the original split correctly
+kept the overwhelming majority of chain-PFAS in train while preserving a
+small, real validation set.
+
+**Fix implemented in `scripts/prepare_combined_nistpfas_enveda180_dataset.py`:**
+NIST-PFAS's original `fold` column is now loaded and preserved as-is;
+the Murcko Histogram Split (section 16) now runs *only* on Enveda-180's
+184,330 molecules (which never had a prior split to preserve), not the
+whole combined pool. `assign_folds()` itself is unchanged -- just called
+on a filtered `mol_info` dict excluding NIST-PFAS's molecules, then the
+two fold maps are merged (NIST-PFAS's preserved values take precedence
+on the rare inchikey overlap).
+
+**Result, full re-run:**
+
+| Category | Train | Val |
+|---|---|---|
+| Chain-PFAS | 18,975 (95.38%) | 920 (4.62%) |
+| Drug-like isolated | 59,763 (73.52%) | 21,529 (26.48%) |
+| Other fluorinated | 147,526 (78.12%) | 41,327 (21.88%) |
+| Non-fluorinated | 665,786 (74.59%) | 226,858 (25.41%) |
+
+Chain-PFAS now matches NIST-PFAS's original ratio almost exactly (95.38%
+vs. the source's 96.2%), and every other category retains healthy
+representation in both folds. Molecule-level split: 75.97% train /
+24.03% val (n=184,433). Re-verified: combined TSV still loads correctly
+via `IonModeMassSpecDataset`/`MassSpecDataModule` (892,050 train / 290,634
+val spectra), and the Tanimoto validation re-run on the corrected file
+still shows a healthy, leak-free distribution (mean similarity 0.445,
+max 0.930, 0 near-duplicate (>=0.99) matches out of 44,315 val
+molecules) -- the fix didn't introduce leakage. Updated plot saved to
+`~/Downloads/DreaMS-PFAS-Paper/tanimoto_split_quality.png`.
+
+**This is now the dataset to use going forward** for the multi-head
+model.
+
+## 18. Multi-head fluorine/PFAS-type model implemented (2026-07-18)
+
+Built the multi-head model itself (step 2), per Roman's feedback (section
+15) and the brainstormed architecture. Extends `HalogenDetectorDreamsTest`
+per explicit user choice (not `MassSpecGymModel` directly, despite that
+being the initial recommendation -- matches the literal inheritance
+pattern already used for Option A/B).
+
+**New files:**
+- `massspecgym/models/pfas/multihead.py` --
+  `HalogenDetectorDreamsMultiHead(HalogenDetectorDreamsTest)`. Shared
+  trunk: DreaMS embedding + ion-mode one-hot concat -> `Linear(1027,128)`
+  -> ReLU (Option B fusion, same mechanism as `ion_mode_ffn.py`). Three
+  heads off the shared representation: `head_has_f` (binary, trained on
+  every example), `head_oecd_pfas` (binary, loss masked to `has_f=1`
+  examples), `head_subtype` (3-way **multi-label sigmoid** -- not softmax
+  -- `[cf2, cf3, chain]`, loss masked to `is_oecd_pfas=1` examples).
+  `super().__init__()` reuses the DreaMS backbone loading + `random_init`
+  ablation support from `HalogenDetectorDreamsTest`; `forward`/`step`/
+  `on_batch_end`/metrics are all overridden (per-head
+  `BinaryPrecision`/`Recall`/`Accuracy`, 3 sets total, stored in two
+  separate `nn.ModuleDict`s -- `self.metrics_train`/`self.metrics_val`,
+  **not** nested under `"train"`/`"val"` string keys, since `"train"`
+  collides with `nn.Module`'s own `.train()` method and raised
+  `KeyError: "attribute 'train' already exists"` on first attempt).
+- `massspecgym/models/pfas/__init__.py` -- additive export.
+- `scripts/train_PFAS_multihead_model.py` -- new `MultiHeadPFASDataset`
+  reading the combined TSV's precomputed bonus columns
+  (`has_chain_pfas`/`has_isolated_cf2`/`has_isolated_cf3`) directly rather
+  than recomputing via RDKit; derives `ion_mode` from the real
+  `ion_mode_true` bonus column (preferred over the adduct-heuristic since
+  the ground truth is already in the file); derives `has_f` via the
+  standard regex convention and `is_oecd_pfas` as the OR of the three
+  bonus flags. Points `pth=` directly at
+  `combined_nistpfas_enveda180_with_fold.tsv`. **batch_size=128** (up from
+  the single-task scripts' 64) since Head 3's positive rate is low
+  (~6.6% of molecules are `is_oecd_pfas`) -- a batch of 64 would
+  frequently contain few or zero Head-3-eligible examples.
+
+**Local verification (mocked DreaMS backbone, then real data):**
+- Unit-tested `forward()` output shapes (`has_f`:[B], `oecd_pfas`:[B],
+  `subtype`:[B,3]) and gradient flow into all 3 heads + shared trunk.
+- Unit-tested the masking logic specifically, including the edge cases
+  the plan called out: a batch with `is_oecd_pfas` all-zero (Head 3 fully
+  masked -- confirmed `loss_subtype == 0.0` exactly, finite total loss,
+  `.backward()` doesn't raise) and a batch with `has_f` all-zero (Head 2
+  **and** 3 both fully masked -- same clean result).
+- Ran the real end-to-end pipeline (dataset -> dataloader -> model ->
+  train/val step) against a real 2,000-row slice of the actual combined
+  TSV (1,925 train / 75 val spectra, all chain-PFAS in this particular
+  slice since it falls within NIST-PFAS's block) -- confirmed finite
+  losses and successful backward pass on both train and val batches.
+- All touched/added files compile cleanly; `git status` confirms only
+  the intended files changed.
+
+**Not done locally:** full-scale training against the real DreaMS
+checkpoint and the complete 1.18M-spectra combined dataset -- needs the
+user's remote environment, same limitation as every prior training script
+this session. Also explicitly out of scope per the plan: full
+per-ion-mode-per-head PR-table/calibration-curve reporting (v1 has
+epoch-level precision/recall/accuracy/F1 per head only) -- a natural
+fast-follow once the first real training run's numbers are in.
+
+## 19. Full-scale per-task reporting added (2026-07-18)
+
+Extended the multi-head model with the same reporting depth already
+built for the single-head models -- full threshold-sweep PR tables,
+per-ion-mode breakdown, and calibration curves -- across all 5 binary
+tasks (`has_f`, `oecd_pfas`, `cf2`, `cf3`, `chain`).
+
+**Key decision (confirmed with user): report PR unconditionally, over the
+whole validation set, for every task** -- not filtered to each task's
+loss-applicable subset. Every example has a genuinely valid 0/1 label for
+all 5 tasks (a non-PFAS molecule really is `chain=0`, not missing data),
+so masking only matters for the *loss* during training (focusing subtype
+learning within the OECD-PFAS-positive subset); for *reporting*, the more
+useful question is "how does this head perform if run on any spectrum,"
+matching real inference usage. This simplified the implementation
+considerably -- no applicability filtering needed in the reporting path
+at all, just `HalogenDetectorDreamsTest._compute_pr_table` (inherited
+unchanged) called once per task on that task's full y_true/y_prob arrays.
+
+**Changes, all in `massspecgym/models/pfas/multihead.py`:**
+- `_reset_metrics_val` now also resets per-task collection dicts
+  (`self.all_predicted_probs[task]`, `self.all_true_labels[task]`,
+  plus shared `all_identifiers`/`all_ion_modes`).
+- `on_batch_end` (val branch) now also collects predicted probability +
+  true label for all 5 tasks per example, unconditionally.
+- `on_validation_epoch_end` now loops over all 5 tasks after the existing
+  epoch-metric logging: full PR table (`pr_table_{task}_{seed}.csv`),
+  per-ion-mode breakdown (`pr_table_{task}_ion_mode_{mode}_{seed}.csv`,
+  same skip-empty-subset behavior as the single-task version), and
+  calibration data (`calibration_curve_{task}_{seed}.csv`,
+  `score_distribution_{task}_{seed}.csv`).
+- New `_save_combined_calibration_figure` -- per user's choice, **one
+  combined figure** (5 rows x 2 cols: calibration curve + score
+  distribution per row, one row per task) saved as
+  `calibration_curve_multihead_{seed}.png`, rather than 5 separate PNGs.
+- Not reimplemented (flagged as a low-stakes simplification): the
+  single-task version's TP/FN identifier-dump text files -- would
+  multiply into ~15 extra files per validation epoch for a debug aid not
+  essential to this ask.
+
+**Local verification:** re-ran the existing masked-batch loss unit tests
+(unaffected -- loss masking is unchanged, only reporting changed) --
+all still pass. New end-to-end test against the real
+`combined_tiny_sample.tsv` slice (1,925 train / 75 val, 100% chain-PFAS
+in this particular slice) confirmed all 21 expected output files are
+produced (5 PR tables, 5 ion-mode-split PR tables -- only "negative" mode
+present in this slice so 5 not 15, 5 calibration CSVs, 5 score-distribution
+CSVs, 1 combined figure). Confirmed the `cf2`/`cf3` tasks correctly
+produce a full (if uniformly zero precision/recall) PR table on this
+all-negative-class slice, rather than erroring -- expected behavior for
+unconditional reporting on a subset with no positive examples for that
+task, not a bug.
+
+## 20. Reporting output organized into seed_{seed}/ directories (2026-07-18)
+
+Per user request: all PR-table/calibration-curve/identifier-dump output
+now writes into a `seed_{seed}/` subdirectory (created on demand) instead
+of loose files directly in cwd, so a run's full output can be purged with
+one `rm -rf seed_{seed}/`. **Applied to both** the single-task models
+(`HalogenDetectorDreamsTest` in `massspecgym/models/pfas/base.py`, used
+by Option A/B and the original baseline) **and** the multi-head model,
+per user's explicit choice for consistency across every PFAS model in
+this repo.
+
+**Changes:**
+- New `HalogenDetectorDreamsTest._get_seed_output_dir()` helper --
+  `os.makedirs(f"seed_{self.seed}", exist_ok=True)`, returns the path.
+  All file writes in `save_precision_recall_table` (main + per-ion-mode
+  PR tables), `save_calibration_curve` (CSVs + PNG), and the TP/FN
+  identifier-dump block in `on_validation_epoch_end` now go through this.
+  Also fixed a small pre-existing inconsistency while touching this code:
+  the calibration PNG had no `_{seed}` suffix at all (`calibration_curve.png`)
+  unlike every other output file -- now `calibration_curve_{seed}.png`,
+  consistent with the rest.
+- `HalogenDetectorDreamsMultiHead` reuses the same inherited
+  `_get_seed_output_dir()` (no need to redefine) -- all 5 tasks' PR
+  tables, per-ion-mode breakdowns, calibration CSVs, and the combined
+  calibration figure now go under the same `seed_{seed}/` directory.
+- `HalogenDetectorDreamsIonModeLinear`/`HalogenDetectorDreamsIonModeFFN`
+  (Option A/B) get this behavior automatically too, for free -- they
+  don't override the reporting methods, so the inherited change applies
+  without touching those files at all.
+
+**Local verification:** re-ran both the multi-head reporting smoke test
+and a new equivalent test for the base class (mocked backbone, synthetic
+predictions) -- confirmed all files land under `seed_{seed}/` with zero
+loose files in the working directory in both cases. One process note:
+had to use fresh scratch directories for repeat test runs rather than
+`rm -rf`-cleaning old ones, since destructive deletes require explicit
+user confirmation in this environment -- didn't affect the actual
+verification, just the test mechanics.
+

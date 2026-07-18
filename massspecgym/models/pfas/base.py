@@ -1,3 +1,4 @@
+import os
 import torch
 from pytorch_lightning import Trainer
 import numpy, sys
@@ -344,8 +345,9 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         fn_samples = df_fn.sample(min(n_examples_to_sample, len(df_fn)), random_state=42)
 
         # ---- Print Identifiers ----
-        tp_filename = "true_positive_identifiers.txt"
-        fn_filename = "false_negative_identifiers.txt"
+        seed_dir = self._get_seed_output_dir()
+        tp_filename = os.path.join(seed_dir, "true_positive_identifiers.txt")
+        fn_filename = os.path.join(seed_dir, "false_negative_identifiers.txt")
 
         # Write True Positive identifiers
         with open(tp_filename, "w") as f:
@@ -361,7 +363,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
 
         # Find the predicted probabilities for all PFAS
         df_p = df_preds[(df_preds["true_label"] == 1)]
-        df_p["pred_prob"].to_csv(f"pfas_pred_probs.csv", index=False)
+        df_p["pred_prob"].to_csv(os.path.join(seed_dir, "pfas_pred_probs.csv"), index=False)
 
         print(f"True Positive identifiers written to {tp_filename}")
         print(f"False Negative identifiers wth probability < 0.2 written to {fn_filename}")
@@ -370,6 +372,17 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         self.save_precision_recall_table()
         self.save_calibration_curve()
 
+
+    def _get_seed_output_dir(self) -> str:
+        """
+        All PR-table/calibration-curve/identifier-dump reporting files are
+        written under this directory (relative to cwd) instead of directly
+        into cwd, so a full run's output can be purged with a single
+        `rm -rf seed_{seed}/` instead of hunting down loose files.
+        """
+        seed_dir = f"seed_{self.seed}"
+        os.makedirs(seed_dir, exist_ok=True)
+        return seed_dir
 
     def _compute_pr_table(self, y_true: np.ndarray, y_prob: np.ndarray) -> pd.DataFrame:
         thresholds = np.arange(0.0, 1.01, 0.1)
@@ -401,12 +414,13 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
     def save_precision_recall_table(self) -> None:
         y_true = np.array(self.all_true_labels)
         y_prob = np.array(self.all_predicted_probs)
+        seed_dir = self._get_seed_output_dir()
 
         df_thresh = self._compute_pr_table(y_true, y_prob)
 
         print("\n=== Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ===")
         print(df_thresh.to_string(index=False))
-        df_thresh.to_csv(f"pr_table_{self.seed}.csv", index=False)
+        df_thresh.to_csv(os.path.join(seed_dir, f"pr_table_{self.seed}.csv"), index=False)
 
         # ---- optional per-ion-mode breakdown (0=negative, 1=positive, 2=unknown) ----
         # Only produced when the dataset actually supplies an "ion_mode" field
@@ -422,7 +436,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
                 if n == 0:
                     continue
                 df_mode = self._compute_pr_table(y_true[mask], y_prob[mask])
-                out_pth = f"pr_table_ion_mode_{mode_name}_{self.seed}.csv"
+                out_pth = os.path.join(seed_dir, f"pr_table_ion_mode_{mode_name}_{self.seed}.csv")
                 df_mode.to_csv(out_pth, index=False)
                 print(f"\n=== Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ({mode_name} mode, n={n}) ===")
                 print(df_mode.to_string(index=False))
@@ -432,6 +446,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
     def save_calibration_curve(self) -> None:
         y_true = np.array(self.all_true_labels)
         y_prob = np.array(self.all_predicted_probs)
+        seed_dir = self._get_seed_output_dir()
 
         fraction_of_positives, mean_predicted_prob = calibration_curve(
             y_true, y_prob, n_bins=10, strategy='uniform'
@@ -442,7 +457,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             'mean_predicted_prob': mean_predicted_prob,
             'fraction_of_positives': fraction_of_positives
         })
-        df_calibration.to_csv(f"calibration_curve_{self.seed}.csv", index=False)
+        df_calibration.to_csv(os.path.join(seed_dir, f"calibration_curve_{self.seed}.csv"), index=False)
 
         # --- Save score distribution data ---
         df_scores = pd.DataFrame({
@@ -450,7 +465,7 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
             'true_label': y_true,
             'class': ['PFAS' if t == 1 else 'Non-PFAS' for t in y_true]
         })
-        df_scores.to_csv(f"score_distribution_{self.seed}.csv", index=False)
+        df_scores.to_csv(os.path.join(seed_dir, f"score_distribution_{self.seed}.csv"), index=False)
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -474,7 +489,8 @@ class HalogenDetectorDreamsTest(MassSpecGymModel):
         ax2.legend()
 
         plt.tight_layout()
-        plt.savefig('calibration_curve.png', dpi=300)
+        plt.savefig(os.path.join(seed_dir, f"calibration_curve_{self.seed}.png"), dpi=300)
         plt.show()
 
-        print("Saved: calibration_curve.csv, score_distribution.csv")
+        print(f"Saved: calibration_curve_{self.seed}.csv, score_distribution_{self.seed}.csv, "
+              f"calibration_curve_{self.seed}.png (all under {seed_dir}/)")
