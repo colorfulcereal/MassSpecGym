@@ -157,7 +157,7 @@ for i in range(0, num_iterations):
     dataset = MultiHeadPFASDataset(
         spec_transform=SpecTokenizer(n_peaks=n_peaks),
         mol_transform=MolToPFASVector(),
-        pth=str(Path("~/Downloads/DreaMS-PFAS-Paper/combined_nistpfas_enveda180_with_fold.tsv").expanduser()),
+        pth='/teamspace/studios/this_studio/files/combined_nistpfas_enveda180_with_fold.tsv',
     )
 
     data_module = MassSpecDataModule(
@@ -179,7 +179,7 @@ for i in range(0, num_iterations):
     )
 
     init_tag = "RandomInit" if random_init else "Pretrained"
-    wandb_logger = WandbLogger(project=f'PFASDetection-MultiHead-CombinedNISTPFASEnveda180-{init_tag}')
+    wandb_logger = WandbLogger(project=f'PFASDetection-MultiHead-CombinedNISTPFASEnveda180')
 
     trainer = Trainer(
             accelerator="auto",
