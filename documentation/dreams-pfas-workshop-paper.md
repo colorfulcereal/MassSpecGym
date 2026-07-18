@@ -426,3 +426,462 @@ debug set) — same pattern as Option A's equivalent check. Confirmed via
 merged dataset — needs the user's remote environment, run independently
 of the in-progress Option A run.
 
+## 10. Real per-ion-mode results from Option A's first full run (2026-07-12)
+
+Real training on `merged_massspec_nist20_nist_new_env_pfas_with_fold.tsv`
+(the actual 737,876-row merged file, obtained from the user's Downloads,
+confirmed to match the ISEF paper's totals) produced the first genuine
+per-ion-mode breakdown
+(`pr_table_ion_mode_{negative,positive,unknown}_1783882568.csv`). Findings:
+
+- **Negative mode (val n=920):** precision 1.0 at every threshold, high
+  recall. Looks "perfect," but this bucket is **100% PFAS-positive** — it
+  is entirely NIST-PFAS's small, homogeneous reference set, so this is a
+  trivial classification task, not evidence of genuine generalization.
+- **Positive mode (val n=45,479, prevalence 0.12%):** precision and
+  recall **collapse to exactly 0** at any threshold ≥ 0.1 — the
+  ion-mode-aware Option A model is not detecting real positive-mode PFAS
+  at all.
+- **"Unknown" mode (val n=97,089, prevalence 0.026%):** same collapse to
+  0. Investigated why this bucket is so large (67.7% of validation) and
+  found it is **not** genuinely ambiguous-polarity spectra — it is
+  **482,381 rows (65% of the whole dataset) where the `adduct` column is
+  literally `NaN`, and every one of those NaN rows is from NIST20**. The
+  only non-null adduct values in the entire file are `[M+H]+`/`[M+Na]+`
+  (MassSpecGym) and `[M–H]–` (NIST-PFAS, note: en-dash, not ASCII
+  hyphen — `ion_mode_idx_from_adduct` already handles both). NIST20's
+  real polarity metadata simply isn't present in this merged TSV's
+  `adduct` column.
+- **Attempted to recover NIST20's real polarity via mass-defect
+  arithmetic** (compute each molecule's monoisotopic mass from its
+  `formula` column, diff against `precursor_mz`, match against known
+  adduct mass shifts). Result: only ~47% of a 20k sample cleanly matched
+  a known shift (41.7% `[M+H]+`, 4.0% `[M+Na]+`, 1.3% `[M+NH4]+`, 0.07%
+  `[M+K]+`, 0.02% `[M-H]-`) — the rest (52.8%) didn't match anything,
+  with wildly scattered diffs. Also found `precursor_formula` is a
+  byte-for-byte duplicate of `formula` for every NIST20 row, suggesting
+  it was never actually computed (likely a placeholder), which further
+  undermines trusting this arithmetic for the majority of rows. Where it
+  *did* cleanly match, the signal skewed positive-mode, not negative —
+  the opposite of what would help the paper's skew narrative. Conclusion:
+  **mass-defect arithmetic is not reliable enough to relabel NIST20's
+  polarity** — the correct fix is to go back to whoever generated this
+  merged TSV (likely Roman) and re-extract the `Ion_mode`/`Precursor_type`
+  field from NIST20's original (licensed) source records, joined back in
+  via `identifier`. No raw NIST20 source file or merge script was found
+  in this local repo checkout, so that re-extraction has to happen
+  wherever the original merge was done.
+
+**Ion-mode distribution among PFAS-positive training examples (n=19,194
+total):**
+
+| Ion mode | Count | % |
+|---|---|---|
+| negative | 18,971 | 98.8% |
+| unknown (NIST20, missing adduct) | 149 | 0.8% |
+| positive | 74 | 0.4% |
+
+**This is the sharpest evidence yet for the core problem.** Only 74
+positive-mode PFAS examples exist in the entire 594,388-row training set.
+No architecture change (Option A/B/C) can be expected to fix positive-mode
+recall on its own with this little real signal to learn from — the
+earlier "+2.5pt recall" aggregate benchmark result (§7.1.1) was almost
+certainly driven by the easy, homogeneous, 920-example negative-mode
+validation bucket, not genuine improvement on positive-mode detection.
+This strengthens the case that **more positive-mode PFAS training data
+(Enveda-180, roadmap step 2) is likely necessary, not just an
+architecture fix**, before positive-mode recall can meaningfully improve.
+
+**Open question for the mentor:** does Roman (or whoever built this
+merged TSV) have access to NIST20's original per-spectrum `Ion_mode`
+field, so real polarity labels can be backfilled for the 482k
+currently-"unknown" rows instead of leaving them unlabeled/guessed?
+
+## 11. Enveda-180 dataset preparation (roadmap step 2, 2026-07-12)
+
+Moved to the next roadmap step: since architecture changes alone can't be
+properly evaluated with only 74 positive-mode PFAS training examples,
+built tooling to prepare **Enveda-180**
+(https://zenodo.org/records/20436851) as a same-schema TSV the existing
+training scripts can point at directly.
+
+**Real facts about Enveda-180** (confirmed by downloading and parsing a
+real partial sample, not assumed from the Zenodo page description alone):
+1,158,293 spectra, 184,330 unique compounds (Enamine HLL-200 drug-like
+screening collection), both polarities (ESI+ 77%, ESI− 23%), explicit
+`ionmode` ground-truth field per spectrum (no heuristic needed), Bruker
+timsTOF Pro 2 instrument. Available as MGF/MSP/JSONL/Parquet,
+filtered/unfiltered. Decided to use the filtered JSONL variant.
+
+**Critical finding, checked before building anything:** of 1,821 unique
+molecules in a ~1% sample, 21.6% contain some fluorine but **zero** meet
+the existing PFAS-chain labeling rule (`MolToPFASVector.has_pf_chain_ge_2`,
+≥2 connected CF2/CF3) — consistent with Enveda-180's fluorine content
+being drug-like isolated-F/CF3 substituents, not environmental chain-PFAS.
+This is only a 1% sample, so **not conclusive** — a full-dataset gate
+check is required (and was explicitly sequenced first) before deciding
+whether Enveda-180 actually helps the chain-PFAS retraining goal, versus
+mainly helping the separate plain-fluorine-detector /
+future-drug-like-PFAS-taxonomy work already on the roadmap.
+
+**Built two scripts** (decisions: separate file not concatenated;
+stratified random split by is_PFAS+ionmode at the molecule level, not a
+full Murcko scaffold split; filtered source):
+- `scripts/check_enveda180_pfas_prevalence.py` — the gate check. Streams
+  the JSONL, dedupes by inchikey, computes PFAS-chain prevalence via the
+  same existing labeling rule, breaks down by real ion mode. Must be run
+  against the full file (~300MB+) wherever that's feasible — a direct
+  download attempt from this sandboxed session was blocked by the
+  harness, so this needs to run on the user's machine or Lightning
+  Studio.
+- `scripts/prepare_enveda180_dataset.py` — the conversion. Maps Enveda-180
+  JSONL fields to the existing TSV's exact column names (only
+  `identifier`/`mzs`/`intensities`/`smiles`/`adduct`/`precursor_mz`/`fold`
+  are actually consumed by the PFAS training/eval pipeline — confirmed by
+  grepping every place each column is read; `formula`/`precursor_formula`/
+  `parent_mass`/`instrument_type`/`collision_energy`/`simulation_challenge`/
+  `name` are carried through best-effort or left blank since unused).
+  Molecule-level stratified train/val split. Adds one bonus column not in
+  the original schema, `ion_mode_true`, carrying Enveda's real ground
+  truth through for future validation use.
+
+**Local verification (dry run against the same partial sample used for
+the gate-check finding above):**
+- Gate-check script reproduced the manual analysis exactly (0 PFAS-chain
+  molecules, 21.58% fluorine, correct ion-mode split).
+- Conversion script produced a valid output TSV.
+- **Loaded the output directly via the real `MassSpecDataset` and
+  `IonModeMassSpecDataset` with zero code changes** — confirms the schema
+  match works end-to-end, including `SpecTokenizer` producing correctly
+  shaped spectra and the dataset's own `fold` column driving
+  `MassSpecDataModule`'s train/val split with no external `split_pth`
+  needed.
+- **Bonus validation: cross-checked `ion_mode_idx_from_adduct`'s heuristic
+  against Enveda-180's real `ionmode` ground truth across 2,000 samples —
+  0 mismatches (0.00%)**. This is reassuring evidence the heuristic itself
+  is sound, at least for clean/standard adduct strings like Enveda-180's;
+  doesn't resolve the separate, larger problem of NIST20's `adduct` field
+  being entirely missing (section 10).
+
+**Not done locally:** the full-dataset gate check and full conversion
+(1.15M spectra) — needs to run wherever the full Enveda-180 file can be
+downloaded (blocked in this sandbox). Next step for the user: run
+`check_enveda180_pfas_prevalence.py` on the full
+`enveda-180-filtered.jsonl.gz` first; only proceed to
+`prepare_enveda180_dataset.py` if that shows non-trivial PFAS-chain
+prevalence.
+
+## 12. Full-dataset gate check result (2026-07-12): Enveda-180 does NOT contain meaningful chain-PFAS content
+
+User downloaded the full **unfiltered** `enveda-180.jsonl.gz` (1.8GB,
+matches Zenodo's listed size) to `~/Downloads/`. Verified gzip integrity,
+then ran `scripts/check_enveda180_pfas_prevalence.py` against the real,
+complete file (not a sample):
+
+- **1,158,293 spectra parsed, 0 JSON errors** (matches Zenodo's stated
+  total exactly — confirms this is the full, uncorrupted dataset).
+- **184,330 unique molecules** (also matches exactly).
+- **22.95% of unique molecules contain some fluorine** (42,310 molecules)
+  — consistent with the ~21.6% found in the earlier 1% sample and the
+  user's "1 in 4" estimate.
+- **Only 1 unique molecule (0.0005%) meets the existing PFAS-chain
+  labeling criterion** (≥2 connected CF2/CF3), contributing just 4
+  spectra total (all ESI Positive, 0 ESI Negative) out of 1,158,293.
+
+**This confirms the 1% sample's finding was representative, not sample
+noise — it's now a definitive, full-dataset result, not an estimate.**
+
+**Implication:** Enveda-180 does **not** solve the specific problem this
+whole effort started from (74 positive-mode chain-PFAS training examples
+is too few). Its ~23% fluorine content is essentially all drug-like
+isolated-F/CF3 substituents, not environmental perfluoroalkyl chains —
+consistent with it being an Enamine drug-like screening collection, not
+an environmental-chemistry library. It remains valuable for the
+**separate** roadmap items already planned (a general fluorine detector,
+and the future drug-like isolated-CF2/CF3 taxonomy work from the ISEF
+paper's own §4.4 Future Work), just not for directly fixing positive-mode
+chain-PFAS scarcity.
+
+**Open question for the user/mentor:** given this result, options going
+forward include (a) still convert Enveda-180 and use it to retrain the
+*plain fluorine detector* (already on the roadmap, independent of the
+chain-PFAS binary classifier), (b) look for a different data source with
+genuine positive-mode environmental chain-PFAS content, or (c) revisit
+whether the strict "≥2 connected CF2/CF3" labeling rule itself is too
+narrow and should be loosened/reconsidered given how little data meets it
+anywhere. Not yet decided.
+
+## 13. Drug-like PFAS (isolated CF2/CF3) EDA on Enveda-180 (2026-07-12)
+
+Given §12's dead-end on chain-PFAS, checked the broader **OECD PFAS
+definition** (Wang et al. 2021, "A New OECD Definition for Per- and
+Polyfluoroalkyl Substances," *Environmental Science & Technology*, DOI
+10.1021/acs.est.1c06896: any chemical with at least one saturated CF2 or
+CF3 moiety, including isolated/non-chain groups) against the full
+Enveda-180 dataset, reusing the existing `MolToIsolatedCF2Vector`/
+`MolToIsolatedCF3Vector` transforms already in this repo
+(`massspecgym/data/transforms.py`) — these already implement this exact
+OECD taxonomy (see `documentation/DreaMS-PFAS_training_and_evaluation.md`'s
+Type 1/Type 2 table). New script: `scripts/check_enveda180_drug_like_pfas.py`.
+
+**Full-dataset result (184,330 unique molecules, 1,158,293 spectra):**
+
+| Category | Unique molecules | % |
+|---|---|---|
+| Chain-PFAS (≥2 connected CF2/CF3) | 1 | 0.0005% |
+| Isolated-CF2-only | 897 | 0.487% |
+| Isolated-CF3-only | 11,112 | 6.028% |
+| Both CF2-only AND CF3-only | 0 | 0% |
+| **Drug-like PFAS (CF2-only OR CF3-only)** | **12,009** | **6.515%** |
+| **Total OECD PFAS (any type)** | **12,010** | **6.515%** |
+
+**Spectrum-level, by ion mode — the encouraging part:**
+
+| Ion mode | n spectra | Drug-like-PFAS-positive | % |
+|---|---|---|---|
+| ESI Positive | 891,903 | 53,406 | 5.99% |
+| ESI Negative | 266,390 | 23,386 | 8.78% |
+
+**Unlike chain-PFAS, drug-like PFAS is well-represented in BOTH
+polarities** — 53,406 positive-mode and 23,386 negative-mode spectra,
+roughly proportional to each mode's overall size. This is the opposite of
+the chain-PFAS problem (98.8% negative-mode skew, §10 for training set).
+
+**Implication:** Enveda-180 is not useless for PFAS work after all — it's
+just the wrong tool for the *current binary chain-PFAS classifier*. It's
+a strong candidate dataset for the **multi-class taxonomy** direction
+already on the roadmap (roadmap step 3; ISEF paper §4.4 Future Work's
+"drug-like fluorinated compounds" class) — 12,009 unique drug-like-PFAS
+molecules with good positive/negative balance is a real, usable training
+signal for extending `MolToFluorinatedTypeVector`'s existing 4-class
+scheme (environmental PFAS chain / isolated CF2-CF3 / other F / non-F)
+beyond the current binary model.
+
+**Environment note:** the `dreams_gradio` conda env used for all local
+verification this session has a **stale, non-editable `massspecgym`
+install** in its `site-packages` that's missing `MolToIsolatedCF2Vector`/
+`MolToIsolatedCF3Vector`/`ion_mode_idx_from_adduct` (added to the repo
+this session) — it shadowed the live repo source for this script until
+worked around with `PYTHONPATH=/Users/ramsindhu/MassSpecGym` prepended to
+the invocation. Not fixed permanently (would need `pip install -e .` in
+that env, which wasn't done since it modifies the environment) — worth
+fixing before any future script in that env needs a class not present in
+whatever snapshot was last pip-installed there.
+
+## 14. Combined NIST-PFAS + Enveda-180 PFAS-type distribution, by ion mode (2026-07-12)
+
+User asked: combine **only NIST-PFAS** (excluding NIST20 and
+MassSpecGym) from the existing merged TSV with the full Enveda-180
+dataset, and report chain-PFAS / isolated-CF2 / isolated-CF3 / drug-like
+PFAS distribution cut by ion mode. New script:
+`scripts/check_combined_nistpfas_enveda180_distribution.py`.
+
+**Identifying NIST-PFAS:** confirmed in section 10 that NIST-PFAS = the
+negative-ion-mode subset of the merged TSV (24,391 rows, exact match to
+the ISEF paper's Table 2 total, zero crossover with MassSpecGym/NIST20).
+
+**Bug found + fixed during this analysis:** the merged TSV's stored
+`inchikey` column is **entirely NaN** for this subset (0 non-null out of
+24,391 rows) — deduping by it collapsed all NIST-PFAS molecules into 1.
+Fixed by computing inchikey from SMILES via the same helper the rest of
+this codebase already uses for this exact situation
+(`massspecgym.utils.smiles_to_inchi_key`, used in
+`MassSpecDataset.compute_mol_freq` when inchikey is missing). After the
+fix: 103 unique NIST-PFAS SMILES → 94 unique chain-PFAS molecules, which
+matches the ISEF paper's Table 2 NIST-PFAS unique-PFAS-molecule count
+(91 train + 3 val = 94) exactly — good independent confirmation the fix
+is correct.
+
+**Combined unique molecules (n=184,433 -- NIST-PFAS 103 + Enveda-180
+184,330, negligible overlap):**
+
+| Category | Count | % |
+|---|---|---|
+| Chain-PFAS (≥2 connected) | 95 | 0.052% |
+| Isolated-CF2-only | 899 | 0.487% |
+| Isolated-CF3-only | 11,121 | 6.030% |
+| Drug-like PFAS (either) | 12,018 | 6.516% |
+| Total any-PFAS | 12,113 | 6.568% |
+
+**Spectrum-level, cut by ion mode:**
+
+| Category | Negative (n=290,781: 24,391 NIST-PFAS + 266,390 Enveda) | Positive (n=891,903, all Enveda) |
+|---|---|---|
+| Chain-PFAS | 19,891 (6.84%) | 4 (0.0004%) |
+| Isolated-CF2-only | 2,650 (0.91%) | 3,955 (0.44%) |
+| Isolated-CF3-only | 25,879 (8.90%) | 49,451 (5.54%) |
+| Drug-like (either) | 27,886 (9.59%) | 53,406 (5.99%) |
+| Total any-PFAS | 47,777 (16.43%) | 53,410 (5.99%) |
+
+**Interpretation:**
+- **Chain-PFAS remains just as skewed as before — this combination does
+  not fix positive-mode chain-PFAS scarcity.** Still only 4 positive-mode
+  chain-PFAS spectra total (unchanged, since Enveda-180 contributes only
+  1 chain-PFAS molecule). The 19,891 vs. 4 spectrum-count gap is a
+  reference-library replication artifact (NIST-PFAS's 94 chain-PFAS
+  molecules have many replicate spectra each), not a molecule-diversity
+  fix — same underlying dead-end as sections 12/13, confirmed again at
+  the combined-dataset level.
+- **Drug-like PFAS (isolated CF2/CF3) is reasonably balanced across
+  polarity** — 9.59% negative vs. 5.99% positive, under 2x apart, a world
+  away from chain-PFAS's ~17,000x spectrum-count skew. This signal comes
+  almost entirely from Enveda-180 (NIST-PFAS is a chain-PFAS reference
+  set, contributing little to the isolated-CF2/CF3 categories).
+- **Bottom line:** this combined dataset doesn't help the current binary
+  chain-PFAS classifier's positive-mode recall problem, but is a solid,
+  reasonably balanced training set for the multi-class taxonomy direction
+  (chain-PFAS / drug-like-PFAS / other-F / non-F) already on the roadmap.
+
+## 15. Roman's feedback + multi-head model brainstorm, and the combined dataset file (2026-07-17)
+
+Roman's message: negative-mode chain-PFAS detection isn't a hard problem
+given the precision/recall already achieved; extend to different PFAS
+types and positive-mode data; label the combined dataset per the
+**PubChem PFAS classification** so every F-containing molecule gets some
+label, then train a general fluorine predictor.
+
+**Reference checked:** the PubChem PFAS tree (Wang et al. context aside,
+this is the PMC10634333 "PFAS in PubChem" article) splits into 6
+top-level sections (OECD PFAS definition / PFAS breakdowns by chemistry /
+organofluorine compounds / other diverse fluorinated compounds / PFAS
+collections / regulatory collections); under "PFAS breakdowns by
+chemistry," molecules are organized by functional group, connectivity,
+and chain length. Enveda-180 conveniently carries a `pubchem_cid` field
+per molecule already, which could support a real PubChem lookup later
+(not done in this pass).
+
+**Modeling brainstorm outcome:** recommended a shared-trunk, multi-head
+architecture over one flat multi-class softmax — Head 1 (has-F, trained
+on everything), Head 2 (OECD-PFAS-type vs. other-fluorinated, trained
+where labeled), Head 3 (multi-label sigmoid: `has_isolated_cf2` /
+`has_isolated_cf3` / `has_chain_pfas` — NOT mutually exclusive, since a
+molecule can have more than one simultaneously, confirmed as a real
+possibility, not just theoretical, in this session's own data — see
+below), each with a masked per-sample loss so partially-labeled data
+still contributes to whichever heads it has labels for. Same DreaMS +
+ion-mode-concat trunk as Option A/B. **Recommended Option B (FFN) over
+Option A (linear) for the fusion mechanism**, reasoning: the task is now
+multi-faceted (3 heads, not 1 binary decision) and the combined dataset's
+drug-like-PFAS class is genuinely polarity-balanced (unlike chain-PFAS),
+giving a nonlinear fusion layer real signal to exploit rather than riding
+on one trivially-easy, skewed bucket the way Option A's earlier "recall
+improvement" did.
+
+### 15.1 Combined dataset file built: `combined_nistpfas_enveda180_with_fold.tsv`
+
+New script: `scripts/prepare_combined_nistpfas_enveda180_dataset.py`.
+Merges NIST-PFAS (negative-mode subset of the merged TSV, inchikey
+recomputed from SMILES since the stored column is NaN for this subset --
+same fix as section 14) with the full Enveda-180 dataset into one TSV in
+the existing schema plus 4 bonus columns: `ion_mode_true`,
+`has_chain_pfas`, `has_isolated_cf2`, `has_isolated_cf3` (precomputed via
+the existing `MolToPFASVector`/`MolToIsolatedCF2Vector`/
+`MolToIsolatedCF3Vector` transforms, reusable later for the multi-head
+model without recomputing RDKit classification each time).
+
+**Fold assignment:** per explicit user choice, redone fresh across the
+*whole* combined pool (not preserved per-source) -- **so any future runs
+on this file are not directly comparable to the Option A/B benchmark
+numbers already reported in section 7.1.1**, which trained against
+NIST-PFAS's original split. The stratified split fell back to an
+unstratified random split (one singleton stratum in the fine-grained
+`(has_chain, drug_like, has_pos, has_neg)` stratification key), but
+checked afterward and the resulting proportions landed close to the
+target 20% val fraction anyway for every rare class (chain-PFAS 21% val,
+isolated-CF2 18% val, isolated-CF3 19.5% val) -- no category got
+starved.
+
+**Output:** 1,182,684 total spectra (24,391 NIST-PFAS + 1,158,293
+Enveda-180), 184,433 unique molecules -- written to
+`~/Downloads/DreaMS-PFAS-Paper/combined_nistpfas_enveda180_with_fold.tsv`.
+Sanity-checked: unique-molecule counts (95 chain-PFAS, 899 isolated-CF2,
+11,121 isolated-CF3, 12,018 drug-like) match section 14's numbers
+exactly, confirming the new script is correct.
+
+**Local verification:** dry-run with `--limit-enveda 20000` (chain-PFAS
+count matched NIST-PFAS's known 94/95 exactly), then loaded the dry-run
+output via the real `MassSpecDataset` and `IonModeMassSpecDataset` +
+`MassSpecDataModule` -- confirmed the extra bonus columns don't break
+compatibility with the existing training pipeline (no code changes
+needed, same as the Enveda-180-only conversion). Full run then executed
+against the real, complete source files.
+
+### 15.2 Complete EDA on the combined dataset (mutually-exclusive partition, new this pass)
+
+Previous EDAs (sections 13/14) reported chain-PFAS/isolated-CF2/
+isolated-CF3/drug-like counts but never characterized the remaining
+"other fluorinated" (has F, meets none of those criteria -- e.g. aromatic
+C-F, single CHF/CHF2) or "non-fluorinated" buckets. Completed here by
+reading the written file's bonus columns + a SMILES-based `has_F` check
+(same regex convention already used in `TestMassSpecDataset`/
+`IonModeMassSpecDataset`'s `item['F']` field, for consistency with the
+existing training pipeline).
+
+**Unique-molecule level (n=184,433), mutually exclusive partition:**
+
+| Category | Count | % |
+|---|---|---|
+| Chain-PFAS | 95 | 0.052% |
+| Drug-like isolated (CF2 or CF3) | 12,018 | 6.516% |
+| Other fluorinated (has F, neither of the above) | 30,300 | 16.429% |
+| Non-fluorinated | 142,020 | 77.004% |
+
+Non-exclusive detail: 899 molecules have isolated-CF2 (any), 11,121 have
+isolated-CF3 (any), and **2 molecules have both simultaneously** -- a
+small revision from section 13's "0 found," which only checked
+Enveda-180 alone (184,330 molecules); these 2 come from the marginal
+NIST-PFAS additions (9 of NIST-PFAS's 103 molecules aren't chain-PFAS,
+likely internal standards/calibration compounds in that reference
+library).
+
+**Spectrum level, cut by ion mode (n=1,182,684 total):**
+
+| Category | Negative (n=290,781) | Positive (n=891,903) |
+|---|---|---|
+| Chain-PFAS | 19,891 (6.84%) | 4 (0.0004%) |
+| Drug-like isolated | 27,886 (9.59%) | 53,406 (5.99%) |
+| Other fluorinated | 49,595 (17.06%) | 139,258 (15.61%) |
+| Non-fluorinated | 193,409 (66.51%) | 699,235 (78.40%) |
+
+**Read on this table for the multi-head model design (section 15):**
+Head 1 (has-F) has abundant, well-balanced positive/negative examples in
+every non-non-fluorinated bucket (~22-33% of spectra in either mode).
+Head 2 (OECD-PFAS-type vs. other-F) and Head 3 (subtype) both have
+reasonable data in both polarities **except** chain-PFAS specifically,
+which remains almost exclusively negative-mode (unchanged from every
+earlier finding this session) -- so the multi-head model should be
+expected to learn the drug-like/other-F/non-F distinctions well across
+both polarities, but chain-PFAS subtype prediction will likely remain
+recall-limited on positive-mode spectra regardless of architecture,
+simply from lack of positive examples (4 spectra total).
+
+**Next step (not yet started):** build the multi-head model itself
+(step 2 of the plan agreed with the user), using Option B/FFN fusion per
+the brainstorm above.
+
+### 15.3 Settled: chain-PFAS takes priority over co-occurring isolated groups (2026-07-17)
+
+Checked overlap between `has_chain_pfas` and `has_isolated_cf2`/
+`has_isolated_cf3` in the combined dataset: **0 of 95 chain-PFAS
+molecules** have either isolated flag set. This isn't necessarily because
+no chain-PFAS molecule has a separate, unconnected isolated CF2/CF3 group
+elsewhere -- `_has_isolated_cf2_only`/`_has_isolated_cf3_only`
+(`massspecgym/data/transforms.py`) require **zero PF-carbon-to-PF-carbon
+bonds anywhere in the whole molecule**, so any chain (which has such a
+bond by definition) forces both isolated flags to `False` regardless of
+whether an unrelated isolated group also exists elsewhere in the same
+molecule -- the function can't distinguish "no isolated group" from "has
+an isolated group but also has a chain."
+
+**Decision: this is fine as-is, not a bug to fix.** User's reasoning: a
+molecule containing any chain-like (multi-connected) PFAS is more likely
+to be environmentally relevant PFAS, so chain-PFAS should take priority
+in classification regardless of co-occurring isolated groups. This
+matches the priority ordering already used elsewhere in this codebase
+(`MolToFluorinatedTypeVector`: chain > isolated > other-F > non-F), so no
+code changes needed -- the existing `has_chain_pfas`/`has_isolated_cf2`/
+`has_isolated_cf3` bonus columns in the combined dataset already reflect
+this intended semantics, and Head 3 of the planned multi-head model can
+use them as-is (CF2/CF3 remain co-occurrable with *each other*, just not
+with chain, by design).
+
