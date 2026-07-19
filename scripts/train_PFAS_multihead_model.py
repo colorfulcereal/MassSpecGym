@@ -142,6 +142,7 @@ num_iterations = 1
 random_init = False  # Set to True to ablate transfer learning (random DreaMS weights)
 hidden_dim = 128  # Option B FFN hidden layer size
 loss_weights = (1.0, 1.0, 1.0)  # (has_f, oecd_pfas, subtype)
+enable_calibration_reporting = False  # disabled for now per request -- flip to True to re-enable
 
 # Larger than the single-task scripts' default 64: Head 3's positive rate
 # is low (~6.6% of molecules are is_oecd_pfas), so a batch of 64 would
@@ -176,6 +177,7 @@ for i in range(0, num_iterations):
         batch_size=batch_size,
         lr=lr,
         random_init=random_init,
+        enable_calibration_reporting=enable_calibration_reporting,
     )
 
     init_tag = "RandomInit" if random_init else "Pretrained"
@@ -194,6 +196,7 @@ for i in range(0, num_iterations):
     wandb_logger.experiment.config["random_init"] = random_init
     wandb_logger.experiment.config["hidden_dim"] = hidden_dim
     wandb_logger.experiment.config["loss_weights"] = loss_weights
+    wandb_logger.experiment.config["enable_calibration_reporting"] = enable_calibration_reporting
 
     data_module.prepare_data()
     data_module.setup()

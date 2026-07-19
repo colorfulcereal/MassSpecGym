@@ -1181,3 +1181,164 @@ had to use fresh scratch directories for repeat test runs rather than
 user confirmation in this environment -- didn't affect the actual
 verification, just the test mechanics.
 
+## 21. First real multi-head training run analyzed (2026-07-18)
+
+Analyzed a real (in-progress, ~80% complete) multi-head training run,
+seed `1784398570`, using the `pr_table_*` output described in sections
+19-20. Found the optimal (max-F1) threshold and precision/recall/F1 per
+task, and plotted PR curves + F1-vs-threshold for all 5 tasks in one
+combined figure.
+
+**Discrepancy investigated: W&B showed ~93% precision / ~95% recall for
+`cf3`, but the unconditional PR table topped out around 13-16% precision
+for that task at any threshold.** Root cause (confirmed by re-reading the
+actual code, not a bug):
+- W&B's numbers come from `self.metrics_val["cf3_precision"]` etc. in
+  `_compute_and_log_epoch_metrics`, which are only ever updated on
+  examples where `mask3 = is_oecd_pfas.bool()` is True -- i.e. **masked**
+  to the OECD-PFAS-positive subset, at one fixed threshold (0.5). This
+  exactly matches how Head 3's *loss* is masked during training.
+- The PR-table CSVs (section 19) are **unconditional** -- the whole
+  validation set, full threshold sweep -- per the user's own earlier
+  explicit design choice for reporting.
+- Because Head 3's loss is masked to the OECD-PFAS-positive subset, the
+  model was never trained to reject `cf3` on the ~93% of validation
+  examples that aren't even OECD-PFAS-positive. Evaluated unconditionally,
+  those never-trained-on negatives dominate and crater precision. This is
+  a real, expected consequence of the masked-loss design, not a
+  correctness bug in either number -- the two numbers are answering two
+  different questions ("how good is Head 3 once you already know
+  `is_oecd_pfas=1`?" vs. "how good is Head 3 run on an arbitrary
+  spectrum?").
+
+This discrepancy directly motivated section 22's cascaded PR table.
+
+## 22. Cascaded PR table variant + calibration-reporting toggle (2026-07-18)
+
+Two additions to `massspecgym/models/pfas/multihead.py`, prompted by the
+section 21 discrepancy and by wanting to skip calibration-curve file
+generation for faster iteration on the next training run.
+
+**Cascaded PR table:** a third PR-table variant per applicable task,
+alongside the existing unconditional and per-ion-mode ones, that masks by
+the *upstream head's true label* -- i.e. exactly the same masking the
+loss and the W&B-feeding torchmetrics already use, so it directly
+reconciles the section 21 gap instead of leaving it as an unexplained W&B
+vs. CSV mismatch.
+- New module-level `CASCADE_MASK_TASK` dict: `oecd_pfas -> has_f`,
+  `cf2/cf3/chain -> oecd_pfas`. `has_f` has no entry (no upstream head, so
+  no cascaded variant for it).
+- In `on_validation_epoch_end`, for each task with a `CASCADE_MASK_TASK`
+  entry: filter `y_true`/`y_prob` to only examples where the upstream
+  task's true label is 1, reuse the inherited `_compute_pr_table`
+  unchanged, save to `pr_table_{task}_cascaded_{seed}.csv`.
+
+**Calibration-reporting toggle:** new `enable_calibration_reporting: bool
+= True` constructor parameter. When `False`, `on_validation_epoch_end`
+skips `_save_combined_calibration_figure()` entirely (prints an `[INFO]`
+line instead) -- no calibration-curve or score-distribution CSVs, no
+combined PNG. PR tables (unconditional, per-ion-mode, and cascaded) are
+unaffected either way. `scripts/train_PFAS_multihead_model.py` sets this
+to `False` for the next run (faster iteration; flip back to `True` to
+re-enable), and logs it to the W&B run config.
+
+**Local verification:** synthetic-batch test respecting the real label
+hierarchy (`is_oecd_pfas` only possible when `has_f=1`; `cf2`/`cf3`/`chain`
+only possible when `is_oecd_pfas=1`), mocked DreaMS backbone. Confirmed:
+cascaded PR tables produced for `oecd_pfas`/`cf2`/`cf3`/`chain` with the
+correct example counts (cascaded-`oecd_pfas` n matched total `has_f=1`;
+cascaded-`cf2`/`cf3`/`chain` n matched total `is_oecd_pfas=1`); `has_f`
+correctly has no cascaded file; with the toggle off, PR tables (including
+cascaded) still generate but zero calibration/score-distribution files
+are produced. On the synthetic data, cascaded `oecd_pfas` precision at
+threshold 0.5 (42.5%) was substantially higher than unconditional
+precision at the same threshold (24.6%) -- the same direction of effect
+seen in the real section 21 discrepancy, as expected.
+
+**Follow-up, same day: predicted-cascade PR table.** The true-label
+cascaded table above assumes a *perfect* upstream gate (masks by the
+upstream head's ground-truth label). Real deployment can't do that --
+it has to gate on the upstream head's own *prediction*, and upstream
+mistakes propagate: an upstream false negative silently drops an example
+the true-label cascade would still include, and an upstream false
+positive lets a wrong example through to be scored downstream. Added a
+fourth PR-table variant, `pr_table_{task}_cascaded_predicted_{seed}.csv`,
+that simulates this directly.
+
+- New `CASCADE_CHAIN` dict lists the **full** ordered upstream chain per
+  task (`oecd_pfas -> [has_f]`; `cf2`/`cf3`/`chain -> [has_f, oecd_pfas]`)
+  -- deliberately not reusing the single-hop `CASCADE_MASK_TASK` lookup,
+  because predicted labels have no hierarchy guarantee the way true
+  labels do (true `is_oecd_pfas=1` always implies true `has_f=1` by
+  construction; predicted `oecd_pfas>=threshold` does *not* imply
+  predicted `has_f>=threshold`, since the two heads are independent
+  sigmoids). Using only the direct upstream task would understate how
+  much of the pipeline an example actually has to clear.
+- For each task with an entry, the predicted-cascade mask is the AND,
+  across every task in its chain, of that task's predicted probability
+  (already collected unconditionally per section 19) being
+  `>= self.threshold` -- the same fixed threshold already used for
+  `pred_has_f`/`pred_oecd`/`pred_subtype` in `on_batch_end`.
+- `has_f` has no chain entry, so no predicted-cascade file for it (same
+  as the true-label cascade).
+
+**Local verification:** extended the same synthetic-batch test.
+Confirmed all 4 predicted-cascade files are produced (none for `has_f`),
+and that the chained gate size for the subtype tasks (both `has_f` and
+`oecd_pfas` predicted-positive) is always `<=` the single-stage gate size
+for `oecd_pfas` (`has_f` predicted-positive only) -- verifying the AND
+chaining is actually doing something, not silently collapsing to a
+single-hop check. Also confirmed the predicted-cascade files are
+unaffected by `enable_calibration_reporting=False` (still produced when
+calibration/score-distribution reporting is off).
+
+**Second follow-up, same day: greedy front-to-back threshold selection
+("how will it perform in practice").** The predicted-cascade table above
+still gates every upstream stage at the same fixed `self.threshold`
+(0.5). To answer "what would the deployed pipeline actually achieve if
+each stage used its own best operating point," added
+`_compute_and_save_greedy_cascade_report`, called unconditionally (not
+gated by `enable_calibration_reporting`) right after the main per-task
+loop in `on_validation_epoch_end`.
+
+**Design (confirmed with user: sequential per-stage tuning, not a joint
+combinatorial search over all threshold combinations):**
+- Processes tasks in `TASKS`'s existing order (`has_f`, `oecd_pfas`,
+  `cf2`, `cf3`, `chain`) -- already topologically valid, since
+  `oecd_pfas` only depends on `has_f`, and `cf2`/`cf3`/`chain` only
+  depend on `has_f`+`oecd_pfas`, both processed earlier in the list.
+- For each task: gate the evaluation population on the upstream chain
+  (from `CASCADE_CHAIN`, reused from section 22's predicted-cascade
+  work), but using each upstream task's **own already-chosen** optimal
+  threshold rather than the fixed 0.5. Compute that task's PR table on
+  the gated population, pick its max-F1 threshold (new
+  `_pick_optimal_threshold` helper, excludes the degenerate
+  threshold=1.0 row), record it, move to the next task.
+- This is `O(heads)` independent 1-D searches, not `O(thresholds^heads)`
+  -- deliberately not a joint grid search, since the dependency only
+  flows one direction (upstream population shapes downstream evaluation,
+  never the reverse), so tuning each stage's best point given what
+  already passed through it is the standard tractable approach for
+  cascades. Flagged as a greedy approximation, not a provable joint
+  global optimum, in both the docstring and to the user.
+- Outputs: `pr_table_{task}_cascaded_greedy_{seed}.csv` for
+  `oecd_pfas`/`cf2`/`cf3` (chain's own file too; `has_f`'s greedy table
+  is identical to its already-saved unconditional table, not duplicated),
+  plus the headline `greedy_cascade_pipeline_summary_{seed}.csv` --
+  one row per task with its gate description, population size,
+  chosen threshold, and precision/recall/f1/accuracy at that threshold.
+  This summary is the direct answer to "how will it perform in practice."
+
+**Local verification:** extended the synthetic-batch test. Confirmed the
+summary CSV has all 5 tasks in the correct order, `has_f`'s population
+equals the full validation set (320, the pipeline entry point), and each
+downstream stage's population is `<=` its upstream stage's (populations
+shrink monotonically down the cascade, as they must). Confirmed the 3
+expected `_cascaded_greedy_` PR-table files exist and `has_f`'s does not
+(by design). Note: on this synthetic/untrained-mock-backbone data, the
+max-F1 search picked near-0.0 thresholds for several stages -- expected
+for random, information-free predicted probabilities (predicting
+everything positive trivially maximizes F1 when scores carry no signal),
+not a bug; a real trained model's PR curve should have a genuine interior
+optimum instead.
+
