@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 from torchmetrics.classification import BinaryPrecision, BinaryRecall, BinaryAccuracy
 from sklearn.calibration import calibration_curve
+from sklearn.metrics import precision_score, recall_score, accuracy_score, confusion_matrix
 import matplotlib.pyplot as plt
 
 from massspecgym.models.base import Stage
@@ -15,31 +16,15 @@ TASKS = ["has_f", "oecd_pfas", "cf2", "cf3", "chain"]
 METRIC_CLASSES = {"precision": BinaryPrecision, "recall": BinaryRecall, "accuracy": BinaryAccuracy}
 ION_MODE_NAMES = {0: "negative", 1: "positive", 2: "unknown"}
 
-# For each task, which OTHER task's true label gates its "cascaded" PR
-# table -- i.e. only evaluate this task among examples where the upstream
-# head's TRUE label is 1, matching exactly how the loss and the
-# torchmetrics-based epoch metrics (what W&B shows) are masked in
-# on_batch_end/step. has_f has no upstream head, so no entry. A single
-# direct-upstream lookup is sufficient here (not a full chain) because the
-# TRUE labels are hierarchical by construction: true is_oecd_pfas=1
-# already implies true has_f=1, so masking cf2/cf3/chain by
-# is_oecd_pfas=1 alone also satisfies has_f=1.
-CASCADE_MASK_TASK = {
-    "oecd_pfas": "has_f",
-    "cf2": "oecd_pfas",
-    "cf3": "oecd_pfas",
-    "chain": "oecd_pfas",
-}
-
-# For the PREDICTED-cascade PR table: the full ordered chain of upstream
-# tasks whose PREDICTED label (at self.threshold) must all be positive for
-# this task to even be "reached" in a real deployed pipeline. Unlike
-# CASCADE_MASK_TASK above, this must list the FULL chain, not just the
-# direct upstream task -- predicted labels have no hierarchy guarantee
-# (predicted oecd_pfas>=threshold does not imply predicted has_f>=threshold,
-# since the two heads are separate sigmoids with no architectural
-# constraint tying them together), so skipping has_f here would understate
-# how much of the pipeline the example actually has to clear.
+# For each downstream task, the full ordered chain of upstream tasks whose
+# PREDICTED label must clear its own greedy-chosen threshold for this task
+# to even be "reached" in a real deployed pipeline. Must list the FULL
+# chain, not just the direct upstream task -- predicted labels have no
+# hierarchy guarantee (predicted oecd_pfas>=threshold does not imply
+# predicted has_f>=threshold, since the two heads are separate sigmoids
+# with no architectural constraint tying them together), so skipping
+# has_f here would understate how much of the pipeline the example
+# actually has to clear.
 CASCADE_CHAIN = {
     "oecd_pfas": ["has_f"],
     "cf2": ["has_f", "oecd_pfas"],
@@ -288,13 +273,26 @@ class HalogenDetectorDreamsMultiHead(HalogenDetectorDreamsTest):
             y_true = np.array(self.all_true_labels[task])
             y_prob = np.array(self.all_predicted_probs[task])
 
-            df_thresh = self._compute_pr_table(y_true, y_prob)
-            print(f"\n=== [{task}] Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold "
-                  f"(full val set, n={len(y_true)}) ===")
-            print(df_thresh.to_string(index=False))
-            df_thresh.to_csv(os.path.join(seed_dir, f"pr_table_{task}_{self.seed}.csv"), index=False)
+            # Only has_f gets an unconditional PR table -- it's the
+            # pipeline's entry point (no upstream gate), so "unconditional"
+            # and "true pipeline" are the same thing for it. Downstream
+            # tasks (oecd_pfas/cf2/cf3/chain) only get the true-pipeline
+            # table below, which is the number that actually matters for
+            # deployed performance.
+            if task == "has_f":
+                df_thresh = self._compute_pr_table(y_true, y_prob)
+                print(f"\n=== [{task}] Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold "
+                      f"(full val set, n={len(y_true)}) ===")
+                print(df_thresh.to_string(index=False))
+                df_thresh.to_csv(os.path.join(seed_dir, f"pr_table_{task}_{self.seed}.csv"), index=False)
 
-            if has_ion_mode:
+            # Only has_f's ion-mode breakdown is done here (ungated, matching
+            # its unconditional table above). Downstream tasks' ion-mode
+            # breakdown is done later, gated the same way their main
+            # true-pipeline table is -- see _compute_and_save_true_pipeline_report
+            # -- so it isn't silently inconsistent with the new true-pipeline
+            # semantics (upstream misses counted as negatives, not dropped).
+            if task == "has_f" and has_ion_mode:
                 for mode_idx, mode_name in ION_MODE_NAMES.items():
                     mask = (ion_modes == mode_idx)
                     n = int(mask.sum())
@@ -305,54 +303,8 @@ class HalogenDetectorDreamsMultiHead(HalogenDetectorDreamsTest):
                     df_mode.to_csv(out_pth, index=False)
                     print(f"Wrote per-mode PR table for [{task}] {mode_name} mode (n={n}) to {out_pth}")
 
-            # ---- Cascaded PR table: restricted to examples where the
-            # upstream head's TRUE label is 1, matching exactly how the
-            # loss and the torchmetrics epoch metrics (what W&B shows) are
-            # masked. This reconciles the gap between W&B's per-epoch
-            # numbers (masked, single threshold) and the unconditional
-            # PR table above (every example, full threshold sweep).
-            cascade_mask_task = CASCADE_MASK_TASK.get(task)
-            if cascade_mask_task is not None:
-                cascade_mask = np.array(self.all_true_labels[cascade_mask_task]) == 1
-                n_cascade = int(cascade_mask.sum())
-                if n_cascade > 0:
-                    df_cascade = self._compute_pr_table(y_true[cascade_mask], y_prob[cascade_mask])
-                    out_pth = os.path.join(seed_dir, f"pr_table_{task}_cascaded_{self.seed}.csv")
-                    df_cascade.to_csv(out_pth, index=False)
-                    print(f"\n=== [{task}] CASCADED (only where {cascade_mask_task}=1, n={n_cascade}) "
-                          f"Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ===")
-                    print(df_cascade.to_string(index=False))
-                    print(f"Wrote cascaded PR table for [{task}] to {out_pth}")
-
-            # ---- Predicted-cascade PR table: same idea, but gated on the
-            # upstream head(s)' PREDICTED label at self.threshold rather
-            # than the true label -- this is what a real deployed pipeline
-            # actually sees (has_f, then oecd_pfas, then subtype, each only
-            # run if the previous stage fired). Upstream false negatives
-            # silently drop examples the true-label cascade above would
-            # still include; upstream false positives let wrong examples
-            # through -- so this number is usually somewhat worse than the
-            # true-label cascade, which assumes a perfect upstream gate.
-            cascade_chain = CASCADE_CHAIN.get(task)
-            if cascade_chain is not None:
-                predicted_cascade_mask = np.ones(len(y_true), dtype=bool)
-                for upstream_task in cascade_chain:
-                    upstream_probs = np.array(self.all_predicted_probs[upstream_task])
-                    predicted_cascade_mask &= (upstream_probs >= self.threshold)
-                n_predicted_cascade = int(predicted_cascade_mask.sum())
-                if n_predicted_cascade > 0:
-                    df_predicted_cascade = self._compute_pr_table(
-                        y_true[predicted_cascade_mask], y_prob[predicted_cascade_mask]
-                    )
-                    out_pth = os.path.join(seed_dir, f"pr_table_{task}_cascaded_predicted_{self.seed}.csv")
-                    df_predicted_cascade.to_csv(out_pth, index=False)
-                    chain_desc = " & ".join(f"predicted_{t}>=thr" for t in cascade_chain)
-                    print(f"\n=== [{task}] PREDICTED-CASCADE (only where {chain_desc}, "
-                          f"n={n_predicted_cascade}) Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ===")
-                    print(df_predicted_cascade.to_string(index=False))
-                    print(f"Wrote predicted-cascade PR table for [{task}] to {out_pth}")
-
-        self._compute_and_save_greedy_cascade_report(seed_dir)
+        chosen_threshold = self._compute_and_save_greedy_cascade_report(seed_dir)
+        self._compute_and_save_true_pipeline_report(seed_dir, chosen_threshold)
 
         if self.enable_calibration_reporting:
             self._save_combined_calibration_figure()
@@ -375,18 +327,18 @@ class HalogenDetectorDreamsMultiHead(HalogenDetectorDreamsTest):
         best_row = df_valid.loc[df_valid["f1"].idxmax()]
         return float(best_row["threshold"]), best_row
 
-    def _compute_and_save_greedy_cascade_report(self, seed_dir: str) -> None:
+    def _compute_and_save_greedy_cascade_report(self, seed_dir: str) -> dict:
         """
-        Greedy front-to-back threshold selection, to estimate how the
-        pipeline actually performs end-to-end in deployment (has_f ->
-        oecd_pfas -> subtype, each stage only run if the previous one
-        fired). Picks each head's own max-F1 threshold in dependency
-        order (has_f first, since TASKS is already topologically ordered
-        -- oecd_pfas only depends on has_f, cf2/cf3/chain only depend on
-        has_f+oecd_pfas), gating each downstream head's evaluation
-        population on the upstream head(s)' PREDICTED label at THEIR
-        chosen threshold, rather than the fixed self.threshold used by
-        the predicted-cascade table above.
+        Greedy front-to-back threshold selection: picks each head's own
+        max-F1 threshold in dependency order (has_f first, since TASKS is
+        already topologically ordered -- oecd_pfas only depends on has_f,
+        cf2/cf3/chain only depend on has_f+oecd_pfas), gating each
+        downstream head's threshold search on the upstream head(s)'
+        PREDICTED label at THEIR own chosen threshold. Only writes a
+        summary CSV (one row per task: gate, population size, chosen
+        threshold, resulting P/R/F1/accuracy) -- the chosen thresholds are
+        the real output, consumed by _compute_and_save_true_pipeline_report
+        to build the true end-to-end PR tables.
 
         This is a greedy approximation, not a joint global optimum --
         Head 1's chosen threshold does shape the population Head 2 is
@@ -431,10 +383,6 @@ class HalogenDetectorDreamsMultiHead(HalogenDetectorDreamsTest):
             best_threshold, best_row = self._pick_optimal_threshold(df_thresh)
             chosen_threshold[task] = best_threshold
 
-            if task != "has_f":  # has_f's greedy table == its unconditional table above, no need to duplicate
-                out_pth = os.path.join(seed_dir, f"pr_table_{task}_cascaded_greedy_{self.seed}.csv")
-                df_thresh.to_csv(out_pth, index=False)
-
             summary_rows.append({
                 "task": task, "gate": gate_desc, "n": n, "chosen_threshold": best_threshold,
                 "precision": best_row["precision"], "recall": best_row["recall"],
@@ -447,6 +395,108 @@ class HalogenDetectorDreamsMultiHead(HalogenDetectorDreamsTest):
         print("\n=== Greedy front-to-back cascade: real deployed-pipeline performance estimate ===")
         print(summary_df.to_string(index=False))
         print(f"Wrote greedy cascade pipeline summary to {out_pth}")
+
+        return chosen_threshold
+
+    @staticmethod
+    def _compute_true_pipeline_pr_table(
+        y_true_full: np.ndarray, y_prob_full: np.ndarray, upstream_gate_mask: np.ndarray
+    ) -> pd.DataFrame:
+        """
+        Like HalogenDetectorDreamsTest._compute_pr_table, but evaluated
+        against the FULL validation set rather than only the examples that
+        survived the upstream gate. Any example excluded by
+        upstream_gate_mask is forced to a negative prediction at every
+        threshold, since a real deployed pipeline never even runs this
+        head on an example the earlier stages already rejected -- so a
+        true positive lost upstream must count as a false negative here,
+        not be dropped from the population. This is what makes the result
+        "true" end-to-end precision/recall, unlike the cascaded /
+        cascaded_predicted / cascaded_greedy tables above, which only
+        score survivors and are silent about upstream losses.
+        """
+        thresholds = np.arange(0.0, 1.01, 0.1)
+        rows = []
+        for t in thresholds:
+            y_pred = (upstream_gate_mask & (y_prob_full >= t)).astype(int)
+            precision = precision_score(y_true_full, y_pred, zero_division="warn")
+            recall = recall_score(y_true_full, y_pred, zero_division="warn")
+            accuracy = accuracy_score(y_true_full, y_pred)
+            f1 = (
+                2 * precision * recall / (precision + recall)
+                if (precision + recall) > 0
+                else 0
+            )
+            tn, fp, fn, tp = confusion_matrix(y_true_full, y_pred, labels=[0, 1]).ravel()
+            tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+            rows.append((t, precision, recall, accuracy, f1, tpr, fpr))
+        return pd.DataFrame(
+            rows,
+            columns=["threshold", "precision", "recall", "accuracy", "f1", "tpr", "fpr"]
+        )
+
+    def _compute_and_save_true_pipeline_report(self, seed_dir: str, chosen_threshold: dict) -> None:
+        """
+        True end-to-end precision/recall per task over the WHOLE
+        validation set's ground truth, using each upstream head's greedy-
+        chosen threshold (from _compute_and_save_greedy_cascade_report) as
+        a fixed gate. has_f has no upstream gate, so its true-pipeline
+        table is identical to its unconditional table above -- skipped to
+        avoid duplicating a file.
+
+        Also writes a per-ion-mode breakdown of the same true-pipeline
+        computation (upstream_gate_mask restricted to each mode's subset),
+        so downstream tasks' per-mode reporting stays consistent with
+        their main table's gated semantics -- unlike has_f's ion-mode
+        breakdown (done earlier, in on_validation_epoch_end), which is
+        ungated since has_f has no upstream stage to gate on.
+        """
+        all_probs = {task: np.array(self.all_predicted_probs[task]) for task in TASKS}
+        all_true = {task: np.array(self.all_true_labels[task]) for task in TASKS}
+        ion_modes = np.array(self.all_ion_modes, dtype=object)
+        has_ion_mode = (ion_modes != None).any()  # noqa: E711 (elementwise None check)
+
+        for task in TASKS:
+            chain = CASCADE_CHAIN.get(task)
+            if chain is None:
+                continue
+
+            upstream_gate_mask = np.ones(len(all_true[task]), dtype=bool)
+            for upstream_task in chain:
+                thr = chosen_threshold.get(upstream_task)
+                if thr is None:
+                    continue
+                upstream_gate_mask &= (all_probs[upstream_task] >= thr)
+            gate_desc = " & ".join(f"{t}>={chosen_threshold[t]:.1f}" for t in chain if chosen_threshold.get(t) is not None)
+
+            df_true_pipeline = self._compute_true_pipeline_pr_table(
+                all_true[task], all_probs[task], upstream_gate_mask
+            )
+            out_pth = os.path.join(seed_dir, f"pr_table_{task}_true_pipeline_{self.seed}.csv")
+            df_true_pipeline.to_csv(out_pth, index=False)
+            n_reached = int(upstream_gate_mask.sum())
+            print(f"\n=== [{task}] TRUE PIPELINE (full val set n={len(all_true[task])}, "
+                  f"only {n_reached} reach this stage via {gate_desc}) "
+                  f"Precision / Recall / Accuracy / F1 / TPR / FPR by Threshold ===")
+            print(df_true_pipeline.to_string(index=False))
+            print(f"Wrote true-pipeline PR table for [{task}] to {out_pth}")
+
+            if has_ion_mode:
+                for mode_idx, mode_name in ION_MODE_NAMES.items():
+                    mode_mask = (ion_modes == mode_idx)
+                    n_mode = int(mode_mask.sum())
+                    if n_mode == 0:
+                        continue
+                    df_mode = self._compute_true_pipeline_pr_table(
+                        all_true[task][mode_mask], all_probs[task][mode_mask], upstream_gate_mask[mode_mask]
+                    )
+                    out_pth_mode = os.path.join(
+                        seed_dir, f"pr_table_{task}_true_pipeline_ion_mode_{mode_name}_{self.seed}.csv"
+                    )
+                    df_mode.to_csv(out_pth_mode, index=False)
+                    print(f"Wrote true-pipeline per-mode PR table for [{task}] {mode_name} mode "
+                          f"(n={n_mode}) to {out_pth_mode}")
 
     def _save_combined_calibration_figure(self) -> None:
         """

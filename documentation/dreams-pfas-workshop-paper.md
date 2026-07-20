@@ -1342,3 +1342,162 @@ everything positive trivially maximizes F1 when scores carry no signal),
 not a bug; a real trained model's PR curve should have a genuine interior
 optimum instead.
 
+## 23. Design rationale: why masked/hierarchical heads instead of a simple unconditional classifier (2026-07-18)
+
+Question raised: since every example already has a valid 0/1 label for
+all 5 tasks (a non-fluorinated molecule really is `cf2=cf3=chain=False`,
+not missing data -- see section 18), why not just train all 5 heads
+unconditionally on the whole dataset instead of masking Head 2/3's loss
+to the OECD-PFAS-positive subset?
+
+**Answer:** nothing technical prevents an unconditional classifier --
+the choice to mask is a class-imbalance / gradient-concentration
+decision, not a data-availability one. `chain-PFAS` and the CF2/CF3
+subtypes are rare across the *whole* dataset (~4-8%), so an unconditional
+classifier's gradient would be dominated by trivially-negative
+non-fluorinated examples; the head could reach high accuracy by mostly
+learning "predict negative" without ever being pushed hard on the
+actually-hard decision (CF2 vs. CF3 vs. chain *among molecules already
+known to be PFAS-type*). Masking concentrates the limited positive-label
+signal on exactly the discrimination that matters, and matches how the
+question is really asked at inference time (subtype is only asked once
+you already know it's PFAS-type). The tradeoff is real, and section 21's
+`cf3` discrepancy is a direct demonstration of it: masked training means
+the head is never trained to reject `cf3` on the ~93% of examples outside
+its training distribution, so its *unconditional* PR-table numbers (this
+session's section 24 run: `cf2` max F1 = 0.021, `cf3` max F1 = 0.346) look
+far worse than its masked/cascaded numbers -- both are "correct," they
+just answer different questions.
+
+Flagged as empirically testable, not yet done: could add a training-time
+toggle to disable the masking (train all 3 heads unconditionally) and
+directly compare its unconditional PR tables against the current masked
+model's -- same architecture, same data, only the loss-masking differs.
+Not implemented yet; revisit if useful.
+
+## 24. Second full training run analyzed, no cascading (2026-07-18)
+
+Analyzed a second complete run, seed `1784401755`
+(`~/Downloads/MassSpecGym_seed_1784401755/`), predating the section 22
+cascaded/predicted-cascade/greedy-cascade additions (confirmed: no
+`_cascaded`, `_cascaded_predicted`, or `greedy_cascade_pipeline_summary`
+files present, only the section 19 unconditional + per-ion-mode PR
+tables and section 19's calibration outputs). Printed the full
+threshold-sweep PR table for all 5 tasks and the max-F1 optimal
+threshold/precision/recall/F1/accuracy per task:
+
+| task | best threshold | precision | recall | F1 | accuracy |
+|---|---|---|---|---|---|
+| has_f | 0.5 | 0.842 | 0.682 | 0.754 | 0.902 |
+| oecd_pfas | 0.9 | 0.758 | 0.499 | 0.602 | 0.949 |
+| cf2 | 0.9 | 0.011 | 0.429 | 0.021 | 0.761 |
+| cf3 | 0.9 | 0.219 | 0.824 | 0.346 | 0.788 |
+| chain | 0.3 | 0.768 | 0.840 | 0.802 | 0.999 |
+
+Notable: `chain` performs strongly unconditionally (F1=0.80) but `cf2`
+is essentially unusable evaluated unconditionally (F1 tops out at 0.021,
+precision ~1%) -- exactly the low-base-rate collapse described in
+section 23, since `cf2` is a rare subtype evaluated against the whole
+validation population rather than just the OECD-PFAS-positive subset.
+This run should be re-analyzed with the section 22 cascaded/greedy tools
+once a future run produces those files (this one predates them).
+
+## 25. has_f vs. DreaMS paper Figure 4, and per-ion-mode breakdown (2026-07-18)
+
+Compared the `has_f` head (seed `1784401755` run, section 24) against a
+number quoted from the original DreaMS paper's Figure 4
+(nature.com/articles/s41587-025-02663-3/figures/4, page not directly
+fetchable -- sits behind Nature's login wall): precision=0.90,
+recall=0.57 (task/population match not independently verified against
+the figure itself -- taken as given from the user).
+
+**At threshold=0.8** in our unconditional `has_f` PR table:
+precision=0.952, recall=0.587, F1=0.726, accuracy=0.903. This **strictly
+dominates** the quoted DreaMS figure on both axes simultaneously (higher
+precision AND higher recall, not a tradeoff along the same curve) --
+unlike an earlier comparison at threshold=0.9 (precision=0.972,
+recall=0.544) which beat their precision but lost recall.
+
+**Per-ion-mode breakdown at the same threshold=0.8** (directly answering
+the original motivating concern from section 15 -- Roman's observation
+that training data skews toward negative-mode -- by checking whether
+`has_f` actually generalizes evenly across modes or is quietly riding on
+negative-mode-only signal):
+
+| | precision | recall | F1 | accuracy |
+|---|---|---|---|---|
+| Combined | 0.952 | 0.587 | 0.726 | 0.903 |
+| Negative mode | 0.956 | 0.594 | 0.733 | 0.884 |
+| Positive mode | 0.950 | 0.584 | 0.723 | 0.909 |
+
+Both modes individually beat the quoted DreaMS numbers on both axes, and
+the two modes are within ~1 point of each other on precision and recall
+-- `has_f` does not collapse in positive-ion mode despite the training
+data's negative-mode skew. Caveats before citing externally: (1) the
+DreaMS Figure 4 task/population match with our `has_f` task was not
+independently confirmed (Nature page is paywalled, taken as given from
+the user's reading of the figure); (2) this is one seed at one fixed
+threshold -- worth checking it holds on the other analyzed seed
+(`1784398570`, section 21) and isn't a lucky draw before treating it as
+a stable result.
+
+## 26. Reporting simplified to has_f table + true-pipeline tables only; new "true pipeline" PR variant added (2026-07-19)
+
+Two changes to `multihead.py`'s `on_validation_epoch_end`, both in
+`massspecgym/models/pfas/multihead.py`.
+
+**New: true end-to-end pipeline PR table.** The prior `cascaded_greedy`
+table (section 22) restricted its population to only the examples that
+survived the upstream gates -- a true positive lost upstream (e.g. a real
+`cf3` molecule whose `has_f` head predicted below threshold) simply
+disappeared from the population instead of counting as a miss. This
+understates real deployed-pipeline recall. The new
+`_compute_true_pipeline_pr_table` fixes this: for each downstream task,
+`y_true` is the ground-truth label over the **entire validation set**,
+and `y_pred` is `upstream_gate_mask & (own_prob >= threshold)` -- any
+example that fails the upstream gate is forced to a negative prediction
+and stays in the denominator, so upstream misses correctly show up as
+false negatives. Upstream gate uses each head's own greedy-chosen
+threshold (`_compute_and_save_greedy_cascade_report`, now returns
+`chosen_threshold` instead of discarding it). Output:
+`pr_table_{task}_true_pipeline_{seed}.csv` for `oecd_pfas`/`cf2`/`cf3`/`chain`
+(not `has_f`, which has no upstream gate and is identical to its
+unconditional table).
+
+**Removed: the 3 older cascade PR-table variants** (`cascaded`,
+`cascaded_predicted`, `cascaded_greedy`) and the plain unconditional
+PR table for downstream tasks -- per explicit request, to declutter now
+that `true_pipeline` supersedes them as the answer to "how does this
+head really perform in deployment." `CASCADE_MASK_TASK` (the true-label
+cascade lookup) was deleted as dead code since nothing else referenced
+it. `CASCADE_CHAIN` is retained (now the only cascade-chain dict) since
+it still drives both the greedy threshold search and the true-pipeline
+gating. `has_f`'s unconditional table, `greedy_cascade_pipeline_summary_{seed}.csv`,
+and calibration reporting are all unaffected by this cleanup. Verified
+via the mocked-backbone smoke test (updated to assert the new file set):
+`pr_table_has_f_{seed}.csv` present, `pr_table_{oecd_pfas,cf2,cf3,chain}_{seed}.csv`
+absent, all 4 old cascade-variant filenames absent, and
+`pr_table_{oecd_pfas,cf2,cf3,chain}_true_pipeline_{seed}.csv` present
+with all 11 threshold rows.
+
+**Follow-up, same day: ion-mode breakdown made consistent with true-pipeline
+gating.** Caught a gap right after the cleanup above: the per-ion-mode
+breakdown loop still ran on ungated `y_true`/`y_prob` for every task,
+including downstream ones -- so `pr_table_oecd_pfas_ion_mode_negative_{seed}.csv`
+etc. were still the *old* ungated computation (the same one whose
+aggregate version had just been deleted), while the task's main table
+was now true-pipeline-gated. Two different populations for the same
+task, silently inconsistent. Fixed by moving downstream tasks' ion-mode
+breakdown into `_compute_and_save_true_pipeline_report`: for
+`oecd_pfas`/`cf2`/`cf3`/`chain`, each mode's subset is passed through
+`_compute_true_pipeline_pr_table` with `upstream_gate_mask` also
+restricted to that subset, producing
+`pr_table_{task}_true_pipeline_ion_mode_{mode}_{seed}.csv`. `has_f`'s
+ion-mode breakdown stays where it was (in the main `on_validation_epoch_end`
+loop) and stays ungated, since `has_f` has no upstream stage to gate on
+-- it's correctly the only task where "ungated" and "true pipeline" mean
+the same thing. Verified via the same smoke test: old ungated
+`pr_table_{oecd_pfas,cf2,cf3,chain}_ion_mode_*_{seed}.csv` files are
+absent, new `pr_table_{oecd_pfas,cf2,cf3,chain}_true_pipeline_ion_mode_*_{seed}.csv`
+files are present, `has_f`'s ion-mode files are unaffected.
+
